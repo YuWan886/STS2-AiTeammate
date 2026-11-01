@@ -292,8 +292,9 @@ internal static class AgentSnapshotBuilder
     }
 
     /// <summary>
-    /// No run is in progress: the agent can start a fresh singleplayer run or resume the saved one.
-    /// 主菜单：让 dsh 自己开局/续档。
+    /// No run is in progress: expose the main menu itself (root buttons, submenus and lobbies) so
+    /// the agent can press what a human would, instead of reporting a hardcoded menu.
+    /// 主菜单：根按钮 / 子菜单 / 大厅都暴露给 dsh；开局/续档仍是控制工具。
     /// </summary>
     private static void DetectMenu(Context ctx)
     {
@@ -306,60 +307,23 @@ internal static class AgentSnapshotBuilder
             return;
         }
 
-        ctx.Phase = "menu";
-
-        var characters = SoloRunController.GetCharacterChoices();
-        var canContinue = false;
-        string saveDetail = "no saved run";
-        try
+        if (!AgentMenuSupport.TryCapture(out var menu))
         {
-            canContinue = SaveManager.Instance?.HasRunSave == true;
-            if (canContinue)
-                saveDetail = "a saved singleplayer run exists";
-        }
-        catch (Exception ex)
-        {
-            saveDetail = ex.Message;
+            ctx.Phase = "idle";
+            ctx.Actionable = false;
+            ctx.BlockedBy = "loading";
+            ctx.Notes.Add("The main menu is not open yet. Call sts2_wait.");
+            return;
         }
 
-        var charactersJson = new JsonArray();
-        for (var i = 0; i < characters.Count; i++)
-        {
-            var (id, name) = characters[i];
-            charactersJson.Add(new JsonObject { ["id"] = id, ["name"] = name });
-            ctx.Options.Add(new JsonObject
-            {
-                ["index"] = i,
-                ["kind"] = "character",
-                ["id"] = id,
-                ["label"] = name
-            });
-        }
-
-        if (canContinue)
-        {
-            ctx.Options.Add(new JsonObject
-            {
-                ["index"] = characters.Count,
-                ["kind"] = "continue",
-                ["label"] = "Continue the saved run"
-            });
-        }
-
-        ctx.Json["menu"] = new JsonObject
-        {
-            ["can_start_run"] = characters.Count > 0 && SoloRunController.CanStartNewRun,
-            ["can_continue"] = canContinue,
-            ["max_ascension"] = SoloRunController.MaxAscensionLevel,
-            ["characters"] = charactersJson,
-            ["save"] = saveDetail
-        };
-
-        // Starting/continuing are control tools, not option picks: the plugin calls them directly.
-        ctx.Actionable = false;
-        ctx.BlockedBy = "menu";
-        ctx.Notes.Add("Start a run with sts2_start_run {character, ascension}, "
-                      + "or resume the save with sts2_continue_run.");
+        ctx.Phase = menu.Phase;
+        ctx.Actionable = menu.Actionable;
+        ctx.BlockedBy = menu.BlockedBy;
+        ctx.Json["menu"] = menu.Menu;
+        foreach (var option in menu.Options)
+            ctx.Options.Add(option.ToJson());
+        foreach (var note in menu.Notes)
+            ctx.Notes.Add(note);
     }
 
     private static void FillRunSection(Context ctx, RunState state)

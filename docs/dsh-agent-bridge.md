@@ -62,6 +62,22 @@ dsh 接管时，游戏聊天面板里的玩家发言也交给 dsh，而不是配
 - **不污染决策活性**：`sts2_chat_poll` / `sts2_chat_send` 与 `sts2_takeover` 一样不计入 `AgentBridgeService` 的“dsh 还活着”打点，否则 1 秒一次的聊天轮询会让“dsh 静默回退”永久失效。聊天也不再触发内置的 `TryAutoMessage` 自动闲聊，避免两个声音。
 - 只读模式（`AgentBridgeAllowActions=false`）下聊天中继照常工作：聊天不是游戏动作。
 
+### 1.5 主菜单可见、三种开局与程序化建主（v2.4）
+
+v2.3 及以前，只要 `RunManager` 没有局内状态，快照就一律报 `phase=menu`：主菜单的子菜单、多人建房、每日/自定大厅、角色选择全都看不见，dsh 只能盲开标准单人局；而且它还能在别人已经打开的大厅里再起一局单人，把大厅与运行状态一起弄坏。v2.4 把主菜单整层暴露出来：
+
+- 快照读取 `NGame.Instance.MainMenu.SubmenuStack.Peek()`，按栈顶界面给出 `menu` / `char_select` / `daily_lobby` / `custom_lobby` 四个 phase，并带 `menu.screen`（`main` / `solo` / `multiplayer` / `host` / `join_friend` / `other` 等）区分是哪一层。
+- 每个界面把**可点元素**枚举进 `options[]`（`kind=button|character|modifier|ai_join|ai_remove`）：主菜单文本按钮、子菜单大按钮、角色选择头像、自定模式词条勾选框、Embark/Back 等；`sts2_choose {index}` 按下它们，`sts2_proceed` 等价返回上一层（有 Back 按钮就按，没有就 `SubmenuStack.Pop()`）。
+- 大厅界面额外带 `menu.lobby`：模式、是否房主/单人、玩家列表（名字、角色、是否就绪、是否 AI、是否本地）、`ai_in_lobby`、`can_begin`、种子/进阶/每日服务器时间。
+- 主菜单根会返回 `menu.characters` / `max_ascension` / `can_start_run` / `can_continue`，以及 `menu.modes`、`menu.can_start_daily`、`menu.can_start_custom`、`menu.modifiers`（每日/自定开局可选的词条 id 与名称）。
+- 有弹窗（`NModalContainer.OpenModal`）时快照 `actionable=false`、`blocked_by=modal`，并在 `notes` 里点名弹窗类型——dsh 不会对着被遮住的按钮乱点。
+
+开局与建房也从“只能标准单人”扩成三模式：
+
+- `sts2_start_run {mode: standard|daily|custom, character, ascension, seed, modifiers[]}`。`daily` 不接收角色/进阶/种子/词条：报名日期取 `TimeServer.FetchDailyTime`（失败时回退本地时间，与游戏一致），种子按 `dd_MM_yyyy_1p` 规范化，角色/进阶/2 好 1 坏词条用与 `NDailyRunScreen.SetupLobbyParams` 相同的 RNG 链复算（`DailyRunCompat`，0.107/0.111 的 RNG 差异隔离在 Compat 里），最终以 `GameMode.Daily` + `dailyTime` 直接开局。`custom` 会校验并解析 `modifiers`（id 或名称；`CharacterCards:<角色id>` 可指定牌组来源），互斥词条会拒绝。
+- `sts2_host {mode}`：在干净的主菜单根上打开多人子菜单并 `FastHost(mode)`。**每日/自定大厅没有「添加 AI」按钮，房主一人永远满足不了 `IsAboutToBeginGame`**（多人大厅 1 人拒绝开局），所以 `StartRunLobby.AddLocalHostPlayer` 之后会自动加入 AI 队友并标记 ready；标准大厅仍由角色选择界面的 `ai_join` 选项一键加入 + 准备。
+- 开局/建房/续档都要求主菜单根（`SubmenuStack.Peek() == null`）：任何大厅/子菜单打开时都会被拒绝并提示先 `sts2_proceed`。这堵上了“在大厅里误开单人局”的洞。
+
 
 ## 2. 为什么用 dsh 插件而不是 MCP
 
@@ -185,7 +201,10 @@ TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
 
 | phase | 来源 | 可用动作 |
 |---|---|---|
-| `menu` | 没有进行中的存档（主菜单） | `start_run` / `continue_run`；`options` 列出可选角色 |
+| `menu` | 没有进行中的存档时的主菜单/子菜单（`menu.screen` 区分 `main` / `solo` / `multiplayer` / `host` / `join_friend` / …） | `choose`（按下枚举出的菜单按钮）；`sts2_start_run` / `sts2_host` / `sts2_continue_run`（仅主菜单根）；`proceed` 返回上一层 |
+| `char_select` | 角色选择大厅（单人角色选择或标准多人房的房主/客户端） | `choose`（角色头像、`ai_join`/`ai_remove`、Embark）、`proceed`（返回）；`menu.lobby` 给出玩家/就绪/`can_begin` |
+| `daily_lobby` | 每日大厅（`NDailyRunScreen`，含服务器时间加载期） | `choose`（Embark/Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` / `daily_time` |
+| `custom_lobby` | 自定模式大厅（`NCustomRunScreen`） | `choose`（角色、词条勾选、Embark、Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` |
 | `ai_decision` | 有决策挂在 `AgentDecisionBroker` 上（AI 玩家的决策，或本地玩家的 `kind=hand_select` 选牌） | `sts2_decide`（`decision` 里带 prompt/options 与期望 JSON）；`combat` 段是实时局面 |
 | `ai_busy` | AI 正在执行上一条决策（出牌/结算房间） | 无；`sts2_wait` 等下一个决策，`sts2_state.combat` 可看实时手牌/抽到的牌 |
 | `paused` | 暂停菜单（capstone submenu）打开 | `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon` |
@@ -209,6 +228,42 @@ TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
 | `idle` | 加载、动画、敌方回合等 | —（用 `wait`） |
 
 `actionable` 为 `false` 时，`blocked_by` + `notes` 说明原因。`sts2_wait` 按 `actionable && token != after_token` 唤醒。
+
+### 主菜单 / 大厅（v2.4）
+
+`phase=menu|char_select|daily_lobby|custom_lobby` 时快照带 `menu` 对象：
+
+```jsonc
+"menu": {
+  "screen": "main",                 // main | solo | multiplayer | host | join_friend | char_select | daily_lobby | custom_lobby | other
+  "title": "Main menu",
+  "depth": 0,
+  "can_start_run": true, "can_start_daily": true, "can_start_custom": true,
+  "can_continue": false, "max_ascension": 10, "save": "no saved run",
+  "characters": [{"id":"IRONCLAD","name":"铁甲战士"}],
+  "modes": ["standard","daily","custom"],
+  "modifiers": [{"id":"Draft","name":"牌组草案","kind":"good"}],
+  "lobby": {                        // 仅 char_select / daily_lobby / custom_lobby
+    "mode": "Daily", "host": true, "singleplayer": false,
+    "players": [{"name":"你","character":"铁甲战士","character_id":"IRONCLAD","ready":true,"is_ai":false,"is_local":true}],
+    "local": {"name":"你","character":"铁甲战士","character_id":"IRONCLAD","ready":true},
+    "ai_in_lobby": true, "can_begin": true,
+    "ascension": 4, "seed": "DD_MM_YYYY_2P", "daily_time": "2026-11-01T03:10:00+00:00"
+  }
+}
+```
+
+`options[]` 就是可点列表（`index` 与 `sts2_choose` 一致），元素统一是 `{index, kind, id, label, enabled}`，`kind=modifier` 额外带 `ticked`：
+
+| kind | 含义 | `sts2_choose` 的效果 |
+|---|---|---|
+| `button` | 菜单/子菜单按钮、Embark/Back、角色选择的普通按钮 | `ForceClick()` / `BaseButton.Pressed` |
+| `character` | 角色选择头像（`NCharacterSelectButton`） | `Select()`，等价点选该角色 |
+| `modifier` | 自定模式词条勾选框（`NTickbox`） | 切换勾选 |
+| `ai_join` | 角色选择界面的「添加 AI 队友并准备」 | `AddAiToLobby` + `SetAiReady(true)` |
+| `ai_remove` | 移除大厅里的 AI 队友 | `RemoveAiFromLobby` |
+
+`options` 在每次动作时按当前界面重新枚举；越界会返回错误，dsh 重新 `sts2_state` 即可。主菜单根之外的界面不能用 `sts2_start_run` / `sts2_host` / `sts2_continue_run`（会提示先 `sts2_proceed`）。
 
 ### 选项索引
 
@@ -288,8 +343,9 @@ export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
 | `sts2_decide` | `{decision}` | **v2**：回答 `phase=ai_decision` 里的挂起决策；内容是 prompt 要求的 JSON（对象或字符串均可） |
 | `sts2_chat_poll` | `{after_seq?, wait_seconds?}` | **v2.3**：长轮询玩家聊天（默认等 15s、上限 25s）。返回 `seq` 与 `messages[{seq,from,text,kind,at}]`；无消息时 `wait_timed_out=true` |
 | `sts2_chat_send` | `{text, reply_to?, directives?, nickname?}` | **v2.3**：在聊天面板发言；`reply_to` 回答某条玩家消息（已由内置模型回答的会被拒绝），`directives` 记录战术，`nickname` 改显示名 |
-| `sts2_start_run` | `{character?, ascension?, seed?}` | **v2**：从主菜单开一局新的单人游戏 |
-| `sts2_continue_run` | `{}` | **v2**：读取存档继续 |
+| `sts2_start_run` | `{mode?, character?, ascension?, seed?, modifiers?}` | **v2.4**：从主菜单根开一局新的单人游戏。`mode=standard`（默认）/`custom`（自带种子、进阶、角色与词条）/`daily`（时间服务器日期 + `dd_MM_yyyy_1p` 种子 + 按游戏规则摇出的角色/进阶/2 好 1 坏词条；忽略其它参数）。词条用 `state.menu.modifiers` 里的 id 或名称 |
+| `sts2_host` | `{mode?}` | **v2.4**：从主菜单根程序化建多人房（`standard` / `daily` / `custom`）。每日/自定大厅自动加入并准备 AI 队友；标准大厅用角色选择界面的 `ai_join` 选项。建好后快照进入 `char_select` / `daily_lobby` / `custom_lobby` |
+| `sts2_continue_run` | `{}` | **v2**：读取存档继续（同样要求主菜单根） |
 | `sts2_pause` | `{}` | 打开暂停菜单（`NPauseMenu`）；单人爬塔/AI 队友模式下同时挂起自动化。快照变为 `phase=paused`、不可行动 |
 | `sts2_resume` | `{}` | 关闭暂停菜单并解除自动化挂起 |
 | `sts2_save` | `{}` | 立即写盘当前存档（单人/主机；客户端会被拒绝）。游戏平时在检查点自动存档 |
@@ -299,9 +355,9 @@ export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
 | `sts2_use_potion` | `{potion, target?}` | 用药水；`AnyTime` 药水在战斗外也能用 |
 | `sts2_discard_potion` | `{potion}` | **v2**：丢弃药水 |
 | `sts2_end_turn` | `{}` | 结束回合 |
-| `sts2_choose` | `{index, skip?}` | 地图/奖励/卡牌奖励/篝火/事件/商店/遗物/选包/水晶球/选目标 |
+| `sts2_choose` | `{index, skip?}` | 地图/奖励/卡牌奖励/篝火/事件/商店/遗物/选包/水晶球/选目标；**v2.4** 也按下主菜单/大厅里的按钮、角色头像、自定词条勾选与 `ai_join` |
 | `sts2_select_cards` | `{indices}` | `NCardGridSelectionScreen` 家族多选 |
-| `sts2_proceed` | `{}` | 继续/离开/开箱/结束界面/确认选包/关闭水晶球 |
+| `sts2_proceed` | `{}` | 继续/离开/开箱/结束界面/确认选包/关闭水晶球；**v2.4** 也从当前菜单/大厅返回上一层 |
 | `sts2_autoplay` | `{enabled}` | 开关自动续玩（纯插件侧，不访问游戏） |
 
 工具描述里写清楚当前 phase 对应的用法，模型无需额外学习提示词。
@@ -487,7 +543,11 @@ dsh --profile web --dump-config
 | `AiTeammateCode/Agent/AgentBridgeServer.cs` | TcpListener + 行 JSON 协议 |
 | `AiTeammateCode/Agent/AgentToolExecutor.cs` | 工具分发、`wait` 循环、结果封装、动作串行 |
 | `AiTeammateCode/Agent/AgentSnapshot.cs` | 阶段判定、快照 JSON、token、options |
+| `AiTeammateCode/Agent/AgentMenuSupport.cs` | **v2.4**：主菜单/子菜单/大厅的枚举与按下（`menu` 对象、`options`、`TryPress` / `TryGoBack`） |
 | `AiTeammateCode/Agent/AgentActions.cs` | 各动作的游戏 API/UI 实现 |
+| `AiTeammateCode/Solo/AgentRunLauncher.cs` | **v2.4**：标准/每日/自定单人开局（词条解析、主菜单根守卫） |
+| `AiTeammateCode/Compat/DailyRunCompat.cs` | **v2.4**：每日种子/角色/进阶/2 好 1 坏词条复算（0.107/0.111 RNG 差异） |
+| `AiTeammateCode/Patches/DailyCustomLobbyAiPatch.cs` | **v2.4**：每日/自定多人房创建时自动加入并准备 AI 队友 |
 | `AiTeammateCode/Agent/AgentDecisionBroker.cs` | v2：把 AI 的决策调用挂起，等 dsh 用 `sts2_decide` 回答 |
 | `AiTeammateCode/Agent/AgentChatRelay.cs` | v2.3：聊天中继（玩家发言队列、`sts2_chat_poll` / `sts2_chat_send`、能力探测、超时回退） |
 | `AiTeammateCode/Settings/AiSettings.cs` | 4 个新设置字段 |

@@ -100,6 +100,8 @@ internal static class AgentActions
                     return Decide(args);
                 case "sts2_start_run":
                     return StartRun(args);
+                case "sts2_host":
+                    return HostRun(args);
                 case "sts2_continue_run":
                     return ContinueRun();
                 case "sts2_pause":
@@ -172,11 +174,21 @@ internal static class AgentActions
         return new AgentActionResult(ok, message, ok ? 400 : 0);
     }
 
-    /// <summary>Starts a fresh singleplayer run (character / ascension / seed). 开局。</summary>
+    /// <summary>
+    /// Starts a fresh singleplayer run: standard, today's daily (server time + daily seed/modifiers)
+    /// or a custom run with explicit modifiers. 开局：标准 / 每日 / 自定。
+    /// </summary>
     private static AgentActionResult StartRun(JsonObject args)
     {
-        if (RunManager.Instance?.NetService?.Type is { } startNetType && startNetType != NetGameType.Singleplayer)
-            return Fail("A new run can only be started from a singleplayer session.");
+        if (RunManager.Instance?.DebugOnlyGetState() != null)
+            return Fail("A run is already in progress; finish or abandon it first.");
+
+        // A lobby (character select / host screen / daily / custom) owns its own run start. Firing a
+        // singleplayer run underneath it used to leave the lobby broken and the run half-started.
+        // 大厅里再开单人局会把两侧状态都搞坏，必须先在主菜单根上。
+        var menuError = MenuRootError("start a run");
+        if (menuError != null)
+            return Fail(menuError);
 
         ReleaseAgentPause();
 
@@ -184,9 +196,74 @@ internal static class AgentActions
         var ascension = IntArg(args, "ascension") ?? 0;
         var seed = StringArg(args, "seed");
 
-        var (ok, message) = SoloRunController.StartAgentRun(character, ascension,
-            string.IsNullOrWhiteSpace(seed) ? null : seed);
+        var (ok, message) = AgentRunLauncher.Start(
+            StringArg(args, "mode"),
+            character,
+            ascension,
+            string.IsNullOrWhiteSpace(seed) ? null : seed,
+            StringListArg(args, "modifiers"));
         return new AgentActionResult(ok, message, ok ? 3000 : 0);
+    }
+
+    /// <summary>
+    /// Hosts a multiplayer lobby for one of the three game modes from the clean main menu.
+    /// 程序化建主：标准 / 每日 / 自定。
+    /// </summary>
+    private static AgentActionResult HostRun(JsonObject args)
+    {
+        if (RunManager.Instance?.DebugOnlyGetState() != null)
+            return Fail("A run is already in progress; finish or abandon it first.");
+
+        var menuError = MenuRootError("host a lobby");
+        if (menuError != null)
+            return Fail(menuError);
+
+        var menu = NGame.Instance?.MainMenu;
+        if (menu == null)
+            return Fail("The main menu is not open yet.");
+
+        var mode = AgentRunLauncher.ParseMode(StringArg(args, "mode"));
+        var gameMode = mode switch
+        {
+            AgentRunMode.Daily => GameMode.Daily,
+            AgentRunMode.Custom => GameMode.Custom,
+            _ => GameMode.Standard
+        };
+
+        try
+        {
+            ReleaseAgentPause();
+
+            // FastHost pushes the host submenu and kicks off the net host + lobby screen push; the
+            // lobby itself (daily/custom) adds the AI teammate automatically.
+            var multiplayer = menu.OpenMultiplayerSubmenu();
+            multiplayer.FastHost(gameMode);
+
+            var modeName = gameMode.ToString().ToLowerInvariant();
+            MainFile.Logger.Info($"[Agent] hosting a {gameMode} multiplayer lobby");
+            return new AgentActionResult(true,
+                $"Hosting a {modeName} multiplayer lobby. Call sts2_wait until the lobby screen is ready "
+                + "(phase=char_select / daily_lobby / custom_lobby); the AI teammate is added automatically "
+                + "in daily and custom lobbies.", 3500);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Agent] host {gameMode} failed: {ex}");
+            return Fail("Could not host the lobby: " + ex.Message);
+        }
+    }
+
+    /// <summary>Null when dsh may start something, otherwise why not (main menu must be at its root).</summary>
+    private static string? MenuRootError(string action)
+    {
+        if (NGame.Instance?.MainMenu == null)
+            return $"Cannot {action} yet: the main menu is not open.";
+
+        if (AgentMenuSupport.HasOpenSubmenu)
+            return $"Cannot {action} while a menu screen is open. Leave it first with sts2_proceed "
+                   + "(or press its Back button / Embark to continue).";
+
+        return null;
     }
 
     /// <summary>Resumes the saved singleplayer run. 续档。</summary>
@@ -195,8 +272,9 @@ internal static class AgentActions
         if (RunManager.Instance?.DebugOnlyGetState() != null)
             return Fail("A run is already in progress.");
 
-        if (RunManager.Instance?.NetService?.Type is { } continueNetType && continueNetType != NetGameType.Singleplayer)
-            return Fail("A saved singleplayer run can only be loaded from a singleplayer session.");
+        var menuError = MenuRootError("load the saved run");
+        if (menuError != null)
+            return Fail(menuError);
 
         ReleaseAgentPause();
 
@@ -560,6 +638,17 @@ internal static class AgentActions
     {
         var index = IntArg(args, "index");
         var skip = BoolArg(args, "skip");
+
+        // Main menu / lobby screens: press the option the same capture enumerated.
+        if (snap.Phase is "menu" or "char_select" or "daily_lobby" or "custom_lobby")
+        {
+            if (index is not { } menuIndex)
+                return Fail("Missing 'index' for this menu screen.");
+
+            return AgentMenuSupport.TryPress(menuIndex, out var menuDetail)
+                ? new AgentActionResult(true, menuDetail, 700)
+                : Fail(menuDetail);
+        }
 
         return snap.Phase switch
         {
@@ -1053,8 +1142,17 @@ internal static class AgentActions
             "treasure" => ProceedTreasure(),
             "game_over" => ProceedGameOver(),
             "room_proceed" => ProceedRoom(),
+            "menu" or "char_select" or "daily_lobby" or "custom_lobby" => ProceedMenu(),
             _ => ProceedRoom()
         };
+    }
+
+    /// <summary>Leaves the current main-menu submenu / lobby (back button, or pop the stack at the root screen).</summary>
+    private static AgentActionResult ProceedMenu()
+    {
+        return AgentMenuSupport.TryGoBack(out var detail)
+            ? new AgentActionResult(true, detail, 700)
+            : Fail(detail);
     }
 
     private static AgentActionResult ProceedRewards()
@@ -1333,6 +1431,40 @@ internal static class AgentActions
     {
         try { return args[name]?.GetValue<bool>() ?? false; }
         catch { return false; }
+    }
+
+    /// <summary>Reads a list of strings; accepts a JSON array or a single comma-separated string.</summary>
+    private static List<string>? StringListArg(JsonObject args, string name)
+    {
+        try
+        {
+            if (args[name] is not { } node)
+                return null;
+
+            if (node is JsonArray array)
+            {
+                var list = new List<string>();
+                foreach (var item in array)
+                {
+                    var text = item?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(text))
+                        list.Add(text.Trim());
+                }
+                return list.Count == 0 ? null : list;
+            }
+
+            var single = node.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(single))
+                return null;
+
+            return single.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(part => part.Length > 0)
+                .ToList();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static AgentActionResult Fail(string message) => new(false, message, 0);

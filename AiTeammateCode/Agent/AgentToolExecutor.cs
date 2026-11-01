@@ -89,7 +89,7 @@ internal static class AgentToolExecutor
         var json = new JsonObject
         {
             ["name"] = "sts2-agent-bridge",
-            ["bridge_version"] = "2.1.0",
+            ["bridge_version"] = "2.2.1",
             ["allow_actions"] = AgentBridgeService.AllowActions,
             ["agent_driving"] = AgentDecisionBroker.Enabled,
             ["chat"] = true,
@@ -101,8 +101,13 @@ internal static class AgentToolExecutor
                 + "for that local player arrives as phase=ai_decision kind=hand_select and is answered "
                 + "with sts2_decide. "
                 + "when it shows kind=ai the AI player is yours and decisions come as phase=ai_decision, "
-                + "answered with sts2_decide. Start or resume a run with sts2_start_run / sts2_continue_run; "
-                + "run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon. "
+                + "answered with sts2_decide. "
+                + "From the clean main menu start a singleplayer run with sts2_start_run {mode: "
+                + "standard|daily|custom, character, ascension, seed, modifiers}, host a multiplayer lobby "
+                + "with sts2_host {mode}, or resume with sts2_continue_run. The menu itself is visible: "
+                + "phase=menu/char_select/daily_lobby/custom_lobby lists pressable options, sts2_choose "
+                + "presses them and sts2_proceed goes back. "
+                + "Run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon. "
                 + "sts2_set_nickname changes the AI teammate's display name at any time. "
                 + "sts2_chat_poll returns player chat lines waiting for an answer; reply with "
                 + "sts2_chat_send {text, reply_to} (the poll seq), and use its directives field to record "
