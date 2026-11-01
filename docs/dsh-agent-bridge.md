@@ -54,11 +54,11 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 dsh 接管时，游戏聊天面板里的玩家发言也交给 dsh，而不是配置的 LLM 后端：
 
 - 玩家在面板发言 → `ChatManager` 记录消息后询问 `AgentChatRelay`：只要**最近 10 秒内有插件在轮询 `sts2_chat_poll`**，就把这条消息放进中继队列、不再请求后端。
-- 插件以 `<sts2_chat>` 消息把队列内容注入当前对话，模型用 `sts2_chat_send {text, reply_to}` 回复；mod 走 `ChatManager.AddAiMessage` 渲染，面板、气泡、历史与内置后端完全一致。
+- 插件以 `<sts2_chat>` 消息把队列内容注入当前对话，模型用 `sts2_chat_send {text, reply_to}` 回复；mod 走 `ChatManager.AddAiMessage` 渲染，面板、气泡、历史与内置后端完全一致。注入必须走 dsh 的 **`steer()`（next-step）而不是 `followup()`（next-turn）**：自动驾驶时一轮可以持续整局，`followup` 会把聊天排到那一轮结束之后，玩家等不到回复、mod 先超时补答，模型随后又只能从快照猜 `reply_to`——这正是 v2.4.1 之前“dsh 回复不了、变成 mod 自己回”的根因。
 - `sts2_chat_send` 可带 `directives`（与内置聊天 JSON 同构）与 `nickname`，所以聊天原有的“记录战术 / 改昵称”副作用不会丢。
-- **影响决策的三层保障**：① 消息进入 dsh 的对话上下文；② `sts2_state` / `sts2_wait` 快照带 `chat.recent` 与 `chat.unread`，未读时 `notes` 提示调用 `sts2_chat_poll`；③ dsh 决策提示词末尾追加 `[玩家最近聊天]`（`DecisionService.AppendRecentChat`），即使对话上下文被压缩，玩家最新的话仍会进入本次决策。
+- **影响决策的三层保障**：① 消息进入 dsh 的对话上下文（steer 到当前回合）；② `sts2_state` / `sts2_wait` 快照的 `chat` 段带 `recent`、`unread` 与 **`pending[{seq,from,text,age_seconds}]`**，未读时 `notes` 直接指向 `chat.pending` 的 seq，模型不必再猜；`sts2_chat_poll` 只是插件内部使用的桥接方法，**不是注册给模型的 dsh 工具**，所以提示里不再让模型调用它；③ dsh 决策提示词末尾追加 `[玩家最近聊天]`（`DecisionService.AppendRecentChat`），即使对话上下文被压缩，玩家最新的话仍会进入本次决策。
 - **能力探测而非版本猜测**：插件只有在绑定了一个 dsh 对话后才轮询（任意 `sts2_*` 工具调用、`sts2_autoplay`、自动接管都会绑定）。旧版插件、没绑定对话的 dsh、桥接关闭时不会产生轮询，聊天自动走回内置后端。
-- **回退**：超过 `AgentChatReplyTimeoutSeconds`（默认 120 秒）未回复、或客户端断开，`AgentChatFallbackToBackend` 打开时由内置后端补答并在面板注明；该 `reply_to` 随即标记为“已由内置模型回答”，dsh 迟到的同一 `reply_to` 会被拒绝（不带 `reply_to` 的新发言仍然可以发）。
+- **回退与 `reply_to` 校验**：超过 `AgentChatReplyTimeoutSeconds`（默认 120 秒）未回复、或客户端断开，`AgentChatFallbackToBackend` 打开时由内置后端补答并在面板注明。`sts2_chat_send` 只在 `reply_to` 命中一条**仍在等待**的记录时把它标记为已回答；`reply_to` 命中不了任何存活记录（被清理、猜错、mod 重启）时整条拒绝并回传仍待回复的 seq 列表，让模型用同一段文字重发——不再“照常渲染但不解决等待”。已由内置模型补答的 seq 再收到 dsh 迟到回复时仍会渲染（结果里注明是迟到回复），因为玩家更愿意看到 dsh 的答案；不带 `reply_to` 且只有一条待回复时自动绑定，多条时按新发言发送并提示还有哪些 seq 待回。
 - **不污染决策活性**：`sts2_chat_poll` / `sts2_chat_send` 与 `sts2_takeover` 一样不计入 `AgentBridgeService` 的“dsh 还活着”打点，否则 1 秒一次的聊天轮询会让“dsh 静默回退”永久失效。聊天也不再触发内置的 `TryAutoMessage` 自动闲聊，避免两个声音。
 - 只读模式（`AgentBridgeAllowActions=false`）下聊天中继照常工作：聊天不是游戏动作。
 
@@ -341,8 +341,8 @@ export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
 | `sts2_set_nickname` | `{name}` | 修改 AI 队友显示昵称（≤24 字；空字符串恢复人格名）；名牌、聊天、提示词与联机客户端同步，只读模式也可用 |
 | `sts2_screenshot` | `{}` | 截图，原生 image content |
 | `sts2_decide` | `{decision}` | **v2**：回答 `phase=ai_decision` 里的挂起决策；内容是 prompt 要求的 JSON（对象或字符串均可） |
-| `sts2_chat_poll` | `{after_seq?, wait_seconds?}` | **v2.3**：长轮询玩家聊天（默认等 15s、上限 25s）。返回 `seq` 与 `messages[{seq,from,text,kind,at}]`；无消息时 `wait_timed_out=true` |
-| `sts2_chat_send` | `{text, reply_to?, directives?, nickname?}` | **v2.3**：在聊天面板发言；`reply_to` 回答某条玩家消息（已由内置模型回答的会被拒绝），`directives` 记录战术，`nickname` 改显示名 |
+| `sts2_chat_poll` | `{after_seq?, wait_seconds?}` | **v2.3**：长轮询玩家聊天（默认等 15s、上限 25s）。返回 `seq` 与 `messages[{seq,from,text,kind,at}]`；无消息时 `wait_timed_out=true`。**插件内部调用，不注册为 dsh 工具**（模型改看快照的 `chat.pending`） |
+| `sts2_chat_send` | `{text, reply_to?, directives?, nickname?}` | **v2.3**：在聊天面板发言；`reply_to` 必须是 `chat.pending` / `<sts2_chat>` 里仍在等待的 seq（否则拒绝并回传待回复列表；内置模型已补答的 seq 仍接受为迟到回复），`directives` 记录战术，`nickname` 改显示名 |
 | `sts2_start_run` | `{mode?, character?, ascension?, seed?, modifiers?}` | **v2.4**：从主菜单根开一局新的单人游戏。`mode=standard`（默认）/`custom`（自带种子、进阶、角色与词条）/`daily`（时间服务器日期 + `dd_MM_yyyy_1p` 种子 + 按游戏规则摇出的角色/进阶/2 好 1 坏词条；忽略其它参数）。词条用 `state.menu.modifiers` 里的 id 或名称 |
 | `sts2_host` | `{mode?}` | **v2.4**：从主菜单根程序化建多人房（`standard` / `daily` / `custom`）。每日/自定大厅自动加入并准备 AI 队友；标准大厅用角色选择界面的 `ai_join` 选项。建好后快照进入 `char_select` / `daily_lobby` / `custom_lobby` |
 | `sts2_continue_run` | `{}` | **v2**：读取存档继续（同样要求主菜单根） |

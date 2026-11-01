@@ -109,8 +109,9 @@ internal static class AgentToolExecutor
                 + "presses them and sts2_proceed goes back. "
                 + "Run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon. "
                 + "sts2_set_nickname changes the AI teammate's display name at any time. "
-                + "sts2_chat_poll returns player chat lines waiting for an answer; reply with "
-                + "sts2_chat_send {text, reply_to} (the poll seq), and use its directives field to record "
+                + "chat.pending in a snapshot lists player chat lines waiting for an answer; reply with "
+                + "sts2_chat_send {text, reply_to: <pending seq>} (a reply_to that is not a live pending "
+                + "seq is refused with the seqs that are), and use its directives field to record "
                 + "tactics the player asked for."
         };
         return AgentToolResult.Ok(json.ToJsonString(AgentJson.Options));

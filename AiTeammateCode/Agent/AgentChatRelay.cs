@@ -16,6 +16,12 @@ internal readonly record struct AgentChatOutcome(ChatMessage? Message, bool Fall
 /// the model answers with <c>sts2_chat_send</c>. Routing is gated on *observed* capability — a poll
 /// seen within <see cref="PollFreshness"/> — so an older plugin, a connected-but-unbound dsh, or a
 /// disabled bridge all keep the built-in backend exactly as before.
+///
+/// Every unanswered line is also exposed in the state snapshot (<c>chat.pending</c>) with its seq,
+/// because a driving conversation often notices the player's line in the snapshot before the
+/// plugin's injected follow-up reaches it; answering from that section must use the same seq the
+/// long poll would have announced. A reply_to that does not match a live line is refused with the
+/// waiting seqs instead of being rendered as a detached line, so the wait is not left hanging.
 /// 聊天由 dsh 回复：插件轮询取走玩家发言，模型用 sts2_chat_send 发回来。
 /// </summary>
 internal static class AgentChatRelay
@@ -40,6 +46,7 @@ internal static class AgentChatRelay
     private const int MaxEntries = 50;
     private const int MaxTextLength = 1000;
     private const int PollCeilingSeconds = 25;
+    private const int MaxPendingInSnapshot = 5;
 
     private static readonly Lock Sync = new();
     private static readonly List<Entry> Entries = new();
@@ -296,31 +303,60 @@ internal static class AgentChatRelay
         var directives = args["directives"] as JsonArray;
 
         Entry? entry = null;
+        var note = "";
         lock (Sync)
         {
+            PruneLocked();
+            var open = Entries.Where(candidate => !candidate.Answered).ToList();
             if (replyTo > 0)
             {
                 entry = Entries.FirstOrDefault(candidate => candidate.Seq == replyTo);
+                if (entry == null)
+                {
+                    // A reply_to that matches no live line would silently miss the line the player
+                    // is waiting for: the entry can be pruned after 10 minutes, the mod can have
+                    // restarted, or the model simply guessed a seq. Refuse and hand back the live
+                    // seqs so the very same text can be posted again correctly.
+                    var waiting = open.Count == 0
+                        ? "No chat line is waiting for an answer right now."
+                        : "Chat lines still waiting: " + string.Join(", ", open.Select(candidate => candidate.Seq)) + ".";
+                    return (false, $"reply_to {replyTo} is not an open chat line. {waiting} "
+                                   + "Send the same text again with reply_to set to one of those seqs, "
+                                   + "or without reply_to to post it as a new line.");
+                }
+
+                if (entry.Answered)
+                {
+                    if (!entry.AnsweredByFallback)
+                        return (false, "That chat message was already answered. Do not repeat it; continue playing.");
+
+                    // The built-in backend answered after the wait expired. The attached agent's
+                    // answer is still the better one for the player, so post it instead of
+                    // swallowing it — that used to look like "dsh cannot reply".
+                    note = " (the built-in backend had already answered it after the wait, posted as the late reply)";
+                }
+                else
+                {
+                    entry.Answered = true;
+                }
             }
             else
             {
                 // Tolerate a missing reply_to: with exactly one open line, a free-form answer can
                 // only be the answer to it. This keeps the fallback from double-answering.
-                var open = Entries.Where(candidate => !candidate.Answered).ToList();
                 if (open.Count == 1)
+                {
                     entry = open[0];
+                    entry.Answered = true;
+                }
+                else if (open.Count > 0)
+                {
+                    // Several lines are open; posting this one leaves them unanswered, so tell dsh
+                    // which seqs still need a reply instead of letting the wait time out.
+                    note = " (posted as a new line; chat lines still waiting: "
+                           + string.Join(", ", open.Select(candidate => candidate.Seq)) + ")";
+                }
             }
-
-            if (entry is { Answered: true })
-            {
-                return (false, entry.AnsweredByFallback
-                    ? "That chat message was already answered by the mod's built-in model. "
-                      + "Post a new line without reply_to if you still want to say something."
-                    : "That chat message was already answered.");
-            }
-
-            if (entry != null)
-                entry.Answered = true;
         }
 
         var sender = entry?.Sender ?? "";
@@ -349,8 +385,8 @@ internal static class AgentChatRelay
         }
 
         entry?.Reply.TrySetResult(rendered);
-        MainFile.Logger.Info($"[Agent] dsh 回复聊天{(entry != null ? $"（seq={entry.Seq}）" : "")}: {Truncate(text, 80)}");
-        return (true, $"Posted to the in-game chat panel as {postedAs}.");
+        MainFile.Logger.Info($"[Agent] dsh 回复聊天{(entry != null ? $"（seq={entry.Seq}）" : "")}: {Truncate(text, 80)}{(note.Length > 0 ? " [late/free-form]" : "")}");
+        return (true, $"Posted to the in-game chat panel as {postedAs}.{note}");
     }
 
     // ---- Snapshot ---------------------------------------------------------------------------
@@ -380,10 +416,35 @@ internal static class AgentChatRelay
             // The snapshot must never fail because the chat history is mid-mutation.
         }
 
+        // Every unanswered player line, carrying the seq sts2_chat_send wants. A conversation that
+        // notices the chat in the snapshot before the plugin's injected follow-up lands can answer
+        // it directly instead of guessing a reply_to (the guess used to leave the line hanging until
+        // the backend fallback, which is what produced two different answers to one message).
+        var pending = new JsonArray();
+        int unread;
+        lock (Sync)
+        {
+            PruneLocked();
+            foreach (var entry in Entries.Where(entry => !entry.Answered).OrderBy(entry => entry.Seq)
+                         .Take(MaxPendingInSnapshot))
+            {
+                pending.Add(new JsonObject
+                {
+                    ["seq"] = entry.Seq,
+                    ["from"] = entry.Sender,
+                    ["text"] = Truncate(entry.Text, 300),
+                    ["age_seconds"] = Math.Round((DateTime.UtcNow - entry.CreatedAtUtc).TotalSeconds, 1)
+                });
+            }
+
+            unread = Entries.Count(entry => !entry.Answered);
+        }
+
         return new JsonObject
         {
             ["capable"] = ShouldRelay,
-            ["unread"] = UnreadCount,
+            ["unread"] = unread,
+            ["pending"] = pending,
             ["recent"] = recent
         };
     }
