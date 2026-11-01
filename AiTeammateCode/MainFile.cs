@@ -39,6 +39,10 @@ public static class MainFile
                 PersonalityStore.RegisterData();
             }
 
+            // Changed defaults never reach an existing settings.json, so old files get one pass of
+            // migrations (and a schema-version bump) right after the store becomes usable.
+            AiSettingsStore.Migrate();
+
             // Built-in personality text is localized, so seeding waits until LocManager exists
             // (NGame ready or the settings page build); mod initialization runs before it.
             AiSettingsPage.Register();

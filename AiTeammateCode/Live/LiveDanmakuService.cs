@@ -10,6 +10,7 @@ using AiTeammate.AiTeammateCode.Personality;
 using AiTeammate.AiTeammateCode.Settings;
 using Godot;
 using STS2RitsuLib.Ui.Toast;
+using AiTeammate.AiTeammateCode.Voice;
 
 namespace AiTeammate.AiTeammateCode.Live;
 
@@ -592,6 +593,8 @@ public sealed partial class LiveDanmakuService : Node
                 });
                 StatusText = AiLoc.T("live.status.ai_sent", "AI 已发送弹幕：{Text}", ("Text", text));
                 MainFile.Logger.Info($"[Bilibili] AI 弹幕已发送: {text}");
+                // Optional read-aloud of the AI's own danmaku (viewer danmaku is never read).
+                TtsService.Instance.SpeakDanmaku(text);
             }
             else
             {

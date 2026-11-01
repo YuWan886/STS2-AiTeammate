@@ -19,6 +19,7 @@ using AiTeammate.AiTeammateCode.Solo;
 using AiTeammate.AiTeammateCode.Teamwork;
 using AiTeammate.AiTeammateCode.Patches;
 using AiTeammate.AiTeammateCode.Localization;
+using AiTeammate.AiTeammateCode.Voice;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace AiTeammate.AiTeammateCode;
@@ -105,6 +106,18 @@ public class AiTeammateManager
 
         IsInitialized = true;
         SoloRunController.InstallRunHook();
+
+        // MiniMax TTS: listens to the chat transcript so every AI line path (combat, auto-chat,
+        // player replies, dsh) is covered without touching each call site.
+        try
+        {
+            TtsService.Instance.Attach(ChatManager);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[VOICE] 语音服务初始化失败: {ex.Message}");
+        }
+
         MainFile.Logger.Info("AI 队友管理器初始化完成");
         AiLog.Log("SYSTEM", "AI 队友管理器初始化完成");
 
@@ -651,7 +664,7 @@ public class AiTeammateManager
                 if (!string.IsNullOrWhiteSpace(result.ChatMessage))
                 {
                     AiLog.LogChat(PersonalityManager.Active?.Name ?? "AI", result.ChatMessage);
-                    ChatManager.AddAiMessage(result.ChatMessage);
+                    ChatManager.AddAiMessage(result.ChatMessage, ChatMessageSource.Combat);
 
                     // Let the speech bubble render before card autoplay starts,
                     // otherwise the visual effect lands after the first card play.

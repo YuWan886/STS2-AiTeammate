@@ -82,11 +82,12 @@ public static class CharacterSelectScreenPatch
         nodes.Container.Name = AiContainerName;
         nodes.IsEditingAi = false;
 
-        nodes.Container.AnchorLeft = 0.02f;
-        nodes.Container.AnchorBottom = 1f;
-        nodes.Container.OffsetLeft = 10f;
-        nodes.Container.OffsetBottom = -90f;
-        nodes.Container.MouseFilter = Control.MouseFilterEnum.Pass;
+        // The panel used to be a transparent, full-height column pinned to the screen's left edge.
+        // That column sat right on top of RemotePlayerContainer — the node that owns the lobby's
+        // vanilla "Invite" button — so the invisible overlay swallowed every click aimed at that
+        // button. Park the panel beside the player list and make its whole layout ignore the mouse;
+        // only the real buttons inside can take a click now.
+        ParkBesidePlayerList(__instance, nodes.Container);
 
         __instance.AddChild(nodes.Container);
         _screenNodes[__instance.GetInstanceId()] = nodes;
@@ -118,8 +119,12 @@ public static class CharacterSelectScreenPatch
         n.Container.AddThemeConstantOverride("margin_left", 8);
         n.Container.AddThemeConstantOverride("margin_top", 6);
 
+        // Every layout node stays mouse-transparent so only the real buttons below can take a click.
+        // An invisible container that answers the mouse also eats clicks aimed at vanilla lobby UI
+        // drawn underneath it (the "Invite" button used to be unreachable for exactly that reason).
         var vbox = new VBoxContainer();
         vbox.AddThemeConstantOverride("separation", 6);
+        vbox.MouseFilter = Control.MouseFilterEnum.Ignore;
         n.Container.AddChild(vbox);
 
         n.AddBtn = new Button();
@@ -130,6 +135,7 @@ public static class CharacterSelectScreenPatch
 
         n.CardRow = new HBoxContainer();
         n.CardRow.AddThemeConstantOverride("separation", 6);
+        n.CardRow.MouseFilter = Control.MouseFilterEnum.Ignore;
         vbox.AddChild(n.CardRow);
 
         n.CardBtn = new Button();
@@ -141,22 +147,27 @@ public static class CharacterSelectScreenPatch
 
         var cardHbox = new HBoxContainer();
         cardHbox.AddThemeConstantOverride("separation", 8);
+        cardHbox.MouseFilter = Control.MouseFilterEnum.Ignore;
         n.CardBtn.AddChild(cardHbox);
 
         n.Icon = new TextureRect();
         n.Icon.CustomMinimumSize = new Vector2(40, 40);
         n.Icon.ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize;
         n.Icon.StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered;
+        n.Icon.MouseFilter = Control.MouseFilterEnum.Ignore;
         cardHbox.AddChild(n.Icon);
 
         var cardTextVbox = new VBoxContainer();
         cardTextVbox.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        cardTextVbox.MouseFilter = Control.MouseFilterEnum.Ignore;
         cardHbox.AddChild(cardTextVbox);
 
         n.NameLabel = new Label();
+        n.NameLabel.MouseFilter = Control.MouseFilterEnum.Ignore;
         cardTextVbox.AddChild(n.NameLabel);
 
         n.StatusLabel = new Label();
+        n.StatusLabel.MouseFilter = Control.MouseFilterEnum.Ignore;
         cardTextVbox.AddChild(n.StatusLabel);
 
         n.RemoveBtn = new Button();
@@ -169,9 +180,56 @@ public static class CharacterSelectScreenPatch
         n.HintLabel.Text = AiLoc.T("charselect.hint",
             "Editing the AI teammate: pick a character, then confirm to ready the AI; press Back to return to your own character.");
         n.HintLabel.Visible = false;
+        n.HintLabel.MouseFilter = Control.MouseFilterEnum.Ignore;
+        // Wrap inside the panel instead of stretching it: the hint is one long sentence and used to
+        // widen the whole panel to ~600px.
+        n.HintLabel.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        n.HintLabel.CustomMinimumSize = new Vector2(PanelWidth - 16f, 0f);
+        n.HintLabel.AddThemeFontSizeOverride("font_size", 13);
         vbox.AddChild(n.HintLabel);
 
         return n;
+    }
+
+    // Panel footprint next to the vanilla lobby player list. The character-select layout is empty
+    // there (the list ends at x≈554, InfoPanel starts at y≈345 further right), so the panel can
+    // never overlap anything the player needs to click.
+    private const float PanelWidth = 310f;
+    private const float PanelHeight = 170f;
+    private const float PanelGap = 16f;
+
+    /// <summary>
+    /// Parks the AI panel beside the vanilla lobby player list (<c>RemotePlayerContainer</c>)
+    /// instead of on top of it. That node hosts the "Invite" button, and a transparent full-height
+    /// overlay sitting on top of it silently swallowed every click aimed at the button.
+    /// </summary>
+    private static void ParkBesidePlayerList(NCharacterSelectScreen screen, Control panel)
+    {
+        // Fallback mirrors the vanilla scene rect: RemotePlayerContainer at (36, 45), size 518x354.
+        float left = 554f + PanelGap;
+        float top = 45f;
+
+        var playerList = screen.GetNodeOrNull<Control>("RemotePlayerContainer");
+        if (playerList != null)
+        {
+            Vector2 position = playerList.Position;
+            Vector2 size = playerList.Size;
+            if (size.X > 0f && size.Y > 0f)
+            {
+                left = position.X + size.X + PanelGap;
+                top = position.Y;
+            }
+        }
+
+        panel.AnchorLeft = 0f;
+        panel.AnchorTop = 0f;
+        panel.AnchorRight = 0f;
+        panel.AnchorBottom = 0f;
+        panel.OffsetLeft = left;
+        panel.OffsetTop = top;
+        panel.OffsetRight = left + PanelWidth;
+        panel.OffsetBottom = top + PanelHeight;
+        panel.MouseFilter = Control.MouseFilterEnum.Ignore;
     }
 
     private static void RefreshUi(AiNodes nodes, StartRunLobby lobby)

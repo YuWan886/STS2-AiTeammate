@@ -40,6 +40,7 @@ The mod ships as a **multi-version bundle**: `AiTeammate.dll` is the loader, the
 - **It can read the board**: combat prompts carry hand, draw, discard and exhaust pile contents (**draw order is never exposed**), plus on-demand read-only tools for piles, relics, potions, teammates and the map.
 - **Vision models**: optional screenshot tool so the AI can literally look at the screen.
 - **Bilibili live danmaku**: anonymously receive a stream's chat and scroll it over the game; log in to let the AI reply to viewers.
+- **AI voice (MiniMax TTS)**: the AI can actually speak; pick a voice, speed and emotion, fetch the voice list from your account, preview it, and cap spending per run/hour. By default only chat replies are read aloud.
 - **External agent takeover**: a localhost bridge lets **dsh (DeepSeek Harness)** drive the game directly.
 - **Post-run review**: when a run ends (victory or defeat) the AI reviews the deck, route, relics and fights, then writes the reason and the next-run lesson into that personality's long-term memory.
 - **Fully localized**: settings page, chat panel, character select, toasts and built-in personalities follow the game language (Simplified Chinese / English).
@@ -52,6 +53,7 @@ Everything is configured in **in-game → Settings → Mod Settings → AI Teamm
 - **Decision**: combat decision timeout, chat timeout, out-of-combat retries; whether pile contents go into prompts; whether the AI may call read-only tools in/out of combat (piles, relics, potions, teammate state, map route; teammates' piles in multiplayer); **allow the AI to see the game screen** (screenshot tool, vision models only).
 - **Personality**: select/create/delete profiles; edit backstory, combat philosophy, communication style and decision principles; long-term memory and personality growth toggles (with them on, every finished run is reviewed and saved to memory).
 - **Chat**: AI chat, speech bubbles, auto-speak cooldown, prompt chat history.
+- **AI voice (MiniMax TTS)**: MiniMax API key, base URL, model, voice id (with a fetch button for the account's voices), speed/pitch/emotion, "only read chat replies", volume, characters per request, requests per minute, per-run/per-hour character budgets, host-only playback, interrupt and cache toggles, preview and clear-cache buttons.
 - **Maintenance**: auto/manual content cache refresh, decision/traffic log toggles, log retention, open log folder, reset all settings.
 
 ## Multiplayer

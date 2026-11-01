@@ -39,6 +39,7 @@ public static class NGamePatch
     private static ScrollContainer? _scrollContainer;
     private static Button? _minimizedButton;
     private static Button? _pauseButton;
+    private static Button? _voiceButton;
     private static Label? _chatTitleLabel;
     private static bool _aiNamesHooked;
     private static PanelContainer? _agentBadge;
@@ -359,6 +360,20 @@ public static class NGamePatch
         titleBar.AddChild(pauseBtn);
         _pauseButton = pauseBtn;
 
+        // Speaker shortcut: toggles the same setting as the settings page (voice on/off).
+        var voiceBtn = new Button();
+        voiceBtn.Text = "♪";
+        voiceBtn.CustomMinimumSize = new Vector2(24, 22);
+        voiceBtn.TooltipText = AiLoc.T("chat.voice", "Voice");
+        voiceBtn.Pressed += ToggleVoice;
+        titleBar.AddChild(voiceBtn);
+        _voiceButton = voiceBtn;
+
+        // The settings page writes the same flag, so poll it cheaply instead of tracking events.
+        var voiceStateTimer = new Godot.Timer { WaitTime = 1.0, Autostart = true, OneShot = false };
+        voiceStateTimer.Timeout += UpdateVoiceButton;
+        _chatRoot.AddChild(voiceStateTimer);
+
         mainVbox.AddChild(titleBar);
 
         _scrollContainer = new ScrollContainer();
@@ -496,6 +511,52 @@ public static class NGamePatch
             _inputField.PlaceholderText = solo
                 ? AiLoc.T("chat.placeholder.solo", "Talk to the AI (this interrupts it)...")
                 : AiLoc.T("chat.placeholder", "Type a message...");
+
+        UpdateVoiceButton();
+    }
+
+    /// <summary>Speaker shortcut: flips <c>EnableVoice</c> and persists it. 语音开关。</summary>
+    private static void ToggleVoice()
+    {
+        try
+        {
+            var settings = Settings.AiSettingsStore.Current;
+            var enabled = !settings.EnableVoice;
+            settings.EnableVoice = enabled;
+            Settings.AiSettingsStore.Save();
+
+            if (!enabled)
+                Voice.TtsService.Instance.StopAll();
+
+            UpdateVoiceButton();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[VOICE] 切换语音开关失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>Keeps the speaker button in sync with the live setting (the settings page writes it too).</summary>
+    private static void UpdateVoiceButton()
+    {
+        var button = _voiceButton;
+        if (button == null || !GodotObject.IsInstanceValid(button))
+            return;
+
+        bool enabled;
+        try
+        {
+            enabled = Settings.AiSettingsStore.Current.EnableVoice;
+        }
+        catch
+        {
+            enabled = false;
+        }
+
+        button.TooltipText = enabled
+            ? AiLoc.T("chat.voice_on", "Voice on (click to mute)")
+            : AiLoc.T("chat.voice_off", "Voice off (click to enable)");
+        button.Modulate = enabled ? Colors.White : new Color(1f, 1f, 1f, 0.45f);
     }
 
     /// <summary>Follows dsh attaching/leaving: re-decides panel visibility and the title badge.</summary>

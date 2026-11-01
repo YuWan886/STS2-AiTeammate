@@ -11,6 +11,7 @@ using AiTeammate.AiTeammateCode.Personality;
 using AiTeammate.AiTeammateCode.Solo;
 using AiTeammate.AiTeammateCode.Localization;
 using AiTeammate.AiTeammateCode.Live;
+using AiTeammate.AiTeammateCode.Voice;
 
 namespace AiTeammate.AiTeammateCode.Settings;
 
@@ -155,6 +156,56 @@ public static class AiSettingsPage
     private static readonly ModSettingsValueBinding<AiSettings, int> MaxChatHistoryForPrompt =
         B(s => s.MaxChatHistoryForPrompt, (s, v) => s.MaxChatHistoryForPrompt = v);
 
+    // ---- Voice (MiniMax TTS) ----
+
+    private static readonly ModSettingsValueBinding<AiSettings, bool> EnableVoice =
+        B(s => s.EnableVoice,
+            (s, v) =>
+            {
+                s.EnableVoice = v;
+                if (!v)
+                    TtsService.Instance.StopAll();
+            });
+    private static readonly ModSettingsValueBinding<AiSettings, string> MiniMaxApiKey =
+        B(_ => "",
+            (s, v) => { if (!string.IsNullOrEmpty(v)) s.MiniMaxApiKey = v; });
+    private static readonly ModSettingsValueBinding<AiSettings, string> MiniMaxBaseUrl =
+        B(s => s.MiniMaxBaseUrl, (s, v) => s.MiniMaxBaseUrl = v);
+    private static readonly ModSettingsValueBinding<AiSettings, string> VoiceModel =
+        B(s => s.VoiceModel, (s, v) => s.VoiceModel = v);
+    private static readonly ModSettingsValueBinding<AiSettings, string> VoiceId =
+        B(s => s.VoiceId, (s, v) => s.VoiceId = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceSpeedPercent =
+        B(s => s.VoiceSpeedPercent, (s, v) => s.VoiceSpeedPercent = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoicePitch =
+        B(s => s.VoicePitch, (s, v) => s.VoicePitch = v);
+    private static readonly ModSettingsValueBinding<AiSettings, string> VoiceEmotion =
+        B(s => s.VoiceEmotion, (s, v) => s.VoiceEmotion = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceVolumeDb =
+        B(s => s.VoiceVolumeDb, (s, v) => s.VoiceVolumeDb = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> VoiceChatOnly =
+        B(s => s.VoiceChatOnly, (s, v) => s.VoiceChatOnly = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> VoiceReadDanmaku =
+        B(s => s.VoiceReadDanmaku, (s, v) => s.VoiceReadDanmaku = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceMaxChars =
+        B(s => s.VoiceMaxChars, (s, v) => s.VoiceMaxChars = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceRequestsPerMinute =
+        B(s => s.VoiceRequestsPerMinute, (s, v) => s.VoiceRequestsPerMinute = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceBudgetCharsPerRun =
+        B(s => s.VoiceBudgetCharsPerRun, (s, v) => s.VoiceBudgetCharsPerRun = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceBudgetCharsPerHour =
+        B(s => s.VoiceBudgetCharsPerHour, (s, v) => s.VoiceBudgetCharsPerHour = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> VoiceHostOnly =
+        B(s => s.VoiceHostOnly, (s, v) => s.VoiceHostOnly = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> VoiceInterrupt =
+        B(s => s.VoiceInterrupt, (s, v) => s.VoiceInterrupt = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> VoiceCacheEnabled =
+        B(s => s.VoiceCacheEnabled, (s, v) => s.VoiceCacheEnabled = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceCacheMaxFiles =
+        B(s => s.VoiceCacheMaxFiles, (s, v) => s.VoiceCacheMaxFiles = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> VoiceCacheMaxMegabytes =
+        B(s => s.VoiceCacheMaxMegabytes, (s, v) => s.VoiceCacheMaxMegabytes = v);
+
     private static readonly ModSettingsValueBinding<AiSettings, bool> EnableSoloClimb =
         B(s => s.EnableSoloClimb, (s, v) => s.EnableSoloClimb = v);
     private static readonly ModSettingsValueBinding<AiSettings, string> SoloCharacter =
@@ -224,14 +275,109 @@ public static class AiSettingsPage
                ?? data.Profiles.FirstOrDefault();
     }
 
+    /// <summary>
+    /// Registers the settings entry point plus one child page per category. The single page grew to
+    /// well over a hundred rows, so the mod page is now a category list and every category opens its
+    /// own page (child of the mod page, same sidebar group, reachable from search too).
+    /// 设置页拆分为「主页导航 + 每个分类一页」。
+    /// </summary>
     public static void Register()
+    {
+        RegisterLandingPage();
+
+        RegisterCategoryPage("engine", 10, ConfigureEngine,
+            S("settings.section.engine", "AI Engine"),
+            S("settings.section.engine.desc", "AI 后端、接口地址、模型与连通性测试。"));
+        RegisterCategoryPage("decision", 20, ConfigureDecision,
+            S("settings.section.decision", "Decisions"),
+            S("settings.section.decision.desc", "决策超时、重试，以及 AI 可调用的读取工具与截图。"));
+        RegisterCategoryPage("personality", 30, ConfigurePersonality,
+            S("settings.section.personality", "Personality"),
+            S("settings.section.personality.desc", "当前人格、人格成长与长期记忆。"));
+        RegisterCategoryPage("chat", 40, ConfigureChat,
+            S("settings.section.chat", "Chat"),
+            S("settings.section.chat.desc", "聊天面板、气泡、冷却与自动搭话。"));
+        RegisterCategoryPage("voice", 50, ConfigureVoice,
+            S("settings.section.voice", "AI Voice (MiniMax TTS)"),
+            S("settings.section.voice.desc", "MiniMax 语音朗读：音色、音量、预算与缓存。"));
+        RegisterCategoryPage("live", 60, ConfigureLive,
+            S("settings.section.live", "Bilibili Live Danmaku"),
+            S("settings.section.live.desc", "B站直播间弹幕接入与 AI 回复。"));
+        RegisterCategoryPage("solo", 70, ConfigureSolo,
+            S("settings.section.solo", "Solo Climb"),
+            S("settings.section.solo.desc", "单人 AI 爬塔：角色、进阶、启动与暂停。"));
+        RegisterCategoryPage("agent", 80, ConfigureAgent,
+            S("settings.section.agent", "External Agent (dsh)"),
+            S("settings.section.agent.desc", "dsh 外部 Agent 桥接：端口、令牌、接管与聊天。"));
+        RegisterCategoryPage("maintenance", 90, ConfigureMaintenance,
+            S("settings.section.maintenance", "Maintenance"),
+            S("settings.section.maintenance.desc", "内容缓存、日志与恢复默认。"));
+    }
+
+    private static void RegisterLandingPage()
     {
         RitsuLibFramework.RegisterModSettings(MainFile.ModId, page => page
             .WithTitle(S("settings.page.title", "AI Teammate"))
             .WithModDisplayName(S("settings.page.title", "AI Teammate"))
+            .WithDescription(S("settings.page.description", "Each category has its own page — pick one below."))
             .WithVisibleOnHostSurfaces(ModSettingsHostSurface.All)
-            .AddSection("engine", section => section
-                .WithTitle(S("settings.section.engine", "AI Engine"))
+            .AddSection("categories", section => section
+                .WithTitle(S("settings.categories.title", "Categories"))
+                .AddSubpage("open_engine", S("settings.section.engine", "AI Engine"), "engine",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.engine.desc", "AI 后端、接口地址、模型与连通性测试。"))
+                .AddSubpage("open_decision", S("settings.section.decision", "Decisions"), "decision",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.decision.desc", "决策超时、重试，以及 AI 可调用的读取工具与截图。"))
+                .AddSubpage("open_personality", S("settings.section.personality", "Personality"), "personality",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.personality.desc", "当前人格、人格成长与长期记忆。"))
+                .AddSubpage("open_chat", S("settings.section.chat", "Chat"), "chat",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.chat.desc", "聊天面板、气泡、冷却与自动搭话。"))
+                .AddSubpage("open_voice", S("settings.section.voice", "AI Voice (MiniMax TTS)"), "voice",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.voice.desc", "MiniMax 语音朗读：音色、音量、预算与缓存。"))
+                .AddSubpage("open_live", S("settings.section.live", "Bilibili Live Danmaku"), "live",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.live.desc", "B站直播间弹幕接入与 AI 回复。"))
+                .AddSubpage("open_solo", S("settings.section.solo", "Solo Climb"), "solo",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.solo.desc", "单人 AI 爬塔：角色、进阶、启动与暂停。"))
+                .AddSubpage("open_agent", S("settings.section.agent", "External Agent (dsh)"), "agent",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.agent.desc", "dsh 外部 Agent 桥接：端口、令牌、接管与聊天。"))
+                .AddSubpage("open_maintenance", S("settings.section.maintenance", "Maintenance"), "maintenance",
+                    S("settings.category.open", "Open"),
+                    S("settings.section.maintenance.desc", "内容缓存、日志与恢复默认。"))
+            ));
+    }
+
+    /// <summary>
+    /// Registers one category page. Failure is logged instead of thrown: a broken page must not take
+    /// the rest of the settings (or the mod) down with it.
+    /// 注册单个分类页；失败只记日志，不影响其它页面。
+    /// </summary>
+    private static void RegisterCategoryPage(string pageId, int sortOrder,
+        Action<ModSettingsSectionBuilder> configure, ModSettingsText title, ModSettingsText description)
+    {
+        try
+        {
+            RitsuLibFramework.RegisterModSettings(MainFile.ModId, page => page
+                .AsChildOf(MainFile.ModId)
+                .WithSortOrder(sortOrder)
+                .WithTitle(title)
+                .WithDescription(description)
+                .WithVisibleOnHostSurfaces(ModSettingsHostSurface.All)
+                .AddSection(pageId, configure), pageId);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Settings] 注册设置页 {pageId} 失败: {ex.Message}");
+        }
+    }
+
+    private static void ConfigureEngine(ModSettingsSectionBuilder section) => section
                 .AddChoice("active_backend", S("settings.backend.active", "Active backend"), ActiveBackend,
                     BackendNames.Select(name => new ModSettingsChoiceOption<string>(name, ModSettingsText.Literal(name))),
                     description: S("settings.backend.active.desc", "The LLM service used for decisions and chat."),
@@ -293,10 +439,8 @@ public static class AiSettingsPage
                 .AddButton("test_connection", S("settings.backend.test.label", "Test connection"),
                     S("settings.backend.test.button", "Test backend"), TestConnection,
                     ModSettingsButtonTone.Accent,
-                    S("settings.backend.test.desc", "Send a minimal request to the active backend."))
-            )
-            .AddSection("decision", section => section
-                .WithTitle(S("settings.section.decision", "Decisions"))
+                    S("settings.backend.test.desc", "Send a minimal request to the active backend."));
+    private static void ConfigureDecision(ModSettingsSectionBuilder section) => section
                 .AddIntSlider("decision_timeout", S("settings.decision.timeout", "Combat decision timeout (ms)"), DecisionTimeoutMs,
                     5000, 120000, 1000,
                     description: S("settings.decision.timeout.desc", "Maximum wait for a single combat decision."))
@@ -321,14 +465,17 @@ public static class AiSettingsPage
                     description: S("settings.decision.screenshot.desc",
                         "Adds a screenshot tool to decisions. The current frame is attached to the follow-up request as an image; only vision-capable models can use it, and it costs extra tokens."))
                 .AddParagraph("screenshot_model_hint", ModSettingsText.Dynamic(() => DescribeActiveModelVision()))
-                    .WithEntryVisibleWhen("screenshot_model_hint", () => AiSettingsStore.Current.EnableScreenshotTool)
-            )
-            .AddSection("personality", section => section
-                .WithTitle(S("settings.section.personality", "Personality"))
+                    .WithEntryVisibleWhen("screenshot_model_hint", () => AiSettingsStore.Current.EnableScreenshotTool);
+    private static void ConfigurePersonality(ModSettingsSectionBuilder section) => section
                 .AddDynamicChoice("active_personality", S("settings.personality.active", "Active personality"), ActivePersonality,
                     BuildPersonalityOptions,
                     description: S("settings.personality.active.desc", "The personality used by the AI teammate."),
                     presentation: ModSettingsChoicePresentation.Dropdown)
+                .AddString("ai_nickname", S("settings.nickname.label", "AI nickname"), AiNickname,
+                    placeholder: ModSettingsText.Dynamic(() => AiNames.DefaultName),
+                    maxLength: AiNames.MaxNicknameLength,
+                    description: S("settings.nickname.desc",
+                        "Shown on the AI's nameplate, in chat and in prompts. Leave empty to use the active personality's name. The AI itself (and dsh) can change it during a run; the field shows the latest value when the page is reopened."))
                 .AddToggle("personality_growth", S("settings.personality.growth", "Allow personality growth"), EnablePersonalityGrowth,
                     description: S("settings.personality.growth.desc", "Let the AI summarize and remember experiences after combat."))
                 .AddToggle("long_term_memory", S("settings.personality.memory", "Enable long-term memory"), EnableLongTermMemory,
@@ -352,18 +499,8 @@ public static class AiSettingsPage
                     ModSettingsButtonTone.Danger,
                     S("settings.personality.delete.desc", "Built-in personalities can't be deleted."))
                 .AddButton("restore_personality", S("settings.personality.restore.label", "Restore built-in personality"),
-                    S("settings.personality.restore.button", "Restore"), RestorePersonality)
-            )
-            .AddSection("identity", section => section
-                .WithTitle(S("settings.section.identity", "AI Identity"))
-                .AddString("ai_nickname", S("settings.nickname.label", "AI nickname"), AiNickname,
-                    placeholder: ModSettingsText.Dynamic(() => AiNames.DefaultName),
-                    maxLength: AiNames.MaxNicknameLength,
-                    description: S("settings.nickname.desc",
-                        "Shown on the AI's nameplate, in chat and in prompts. Leave empty to use the active personality's name. The AI itself (and dsh) can change it during a run; the field shows the latest value when the page is reopened."))
-            )
-            .AddSection("chat", section => section
-                .WithTitle(S("settings.section.chat", "Chat"))
+                    S("settings.personality.restore.button", "Restore"), RestorePersonality);
+    private static void ConfigureChat(ModSettingsSectionBuilder section) => section
                 .AddToggle("ai_chat", S("settings.chat.enabled", "Enable AI chat"), EnableAIChat)
                 .AddToggle("speech_bubble", S("settings.chat.bubble", "Show speech bubbles"), EnableSpeechBubble)
                 .AddIntSlider("chat_cooldown", S("settings.chat.cooldown", "Auto-chat cooldown (ms)"), ChatCooldownMs,
@@ -371,10 +508,125 @@ public static class AiSettingsPage
                     .WithEntryVisibleWhen("chat_cooldown", () => AiSettingsStore.Current.EnableAIChat)
                 .AddIntSlider("chat_history", S("settings.chat.history", "Chat history entries in prompt"), MaxChatHistoryForPrompt,
                     0, 30, 1)
-                    .WithEntryVisibleWhen("chat_history", () => AiSettingsStore.Current.EnableAIChat)
-            )
-            .AddSection("live", section => section
-                .WithTitle(S("settings.section.live", "Bilibili Live Danmaku"))
+                    .WithEntryVisibleWhen("chat_history", () => AiSettingsStore.Current.EnableAIChat);
+    private static void ConfigureVoice(ModSettingsSectionBuilder section) => section
+                .AddToggle("voice_enabled", S("settings.voice.enabled", "Read AI lines aloud"), EnableVoice,
+                    description: S("settings.voice.enabled.desc",
+                        "Synthesizes AI speech with MiniMax TTS and plays it on a dedicated voice channel. Voice never blocks combat, and a failed request stays silent."))
+                .AddString("voice_api_key", S("settings.voice.key", "MiniMax API key"), MiniMaxApiKey,
+                    placeholder: ApiKeyPlaceholder(s => s.MiniMaxApiKey),
+                    description: S("settings.voice.key.desc",
+                        "The saved key is never shown. Paste a new key to replace it."))
+                    .WithEntryVisibleWhen("voice_api_key", () => AiSettingsStore.Current.EnableVoice)
+                .AddString("voice_base_url", S("settings.voice.base_url", "MiniMax base URL"), MiniMaxBaseUrl,
+                    description: S("settings.voice.base_url.desc",
+                        "Default https://api.minimax.cn. Mainland players can try https://api-bj.minimaxi.com for the lowest latency."))
+                    .WithEntryVisibleWhen("voice_base_url", () => AiSettingsStore.Current.EnableVoice)
+                .AddChoice("voice_model", S("settings.voice.model", "TTS model"), VoiceModel,
+                    MiniMaxTtsClient.KnownModels.Select(model =>
+                        new ModSettingsChoiceOption<string>(model, ModSettingsText.Literal(model))),
+                    description: S("settings.voice.model.desc",
+                        "speech-2.8-turbo is the fastest and cheapest; the -hd models sound better and cost more."),
+                    presentation: ModSettingsChoicePresentation.Dropdown)
+                    .WithEntryVisibleWhen("voice_model", () => AiSettingsStore.Current.EnableVoice)
+                .AddString("voice_id", S("settings.voice.id", "Voice id"), VoiceId,
+                    description: S("settings.voice.id.desc",
+                        "A system voice id, or a cloned/designed voice id. Use “Fetch voices” below to list what this account can use."))
+                    .WithEntryVisibleWhen("voice_id", () => AiSettingsStore.Current.EnableVoice)
+                .AddDynamicChoice("voice_pick", S("settings.voice.pick", "Voices reported by MiniMax"), VoiceId,
+                    BuildVoiceOptions,
+                    description: S("settings.voice.pick.desc",
+                        "Filled by “Fetch voices”. Selecting a row writes its id into the field above."),
+                    presentation: ModSettingsChoicePresentation.Dropdown)
+                    .WithEntryVisibleWhen("voice_pick", () => AiSettingsStore.Current.EnableVoice)
+                .AddButton("voice_fetch", S("settings.voice.fetch.label", "Voice list"),
+                    S("settings.voice.fetch.button", "Fetch voices"), FetchVoices,
+                    ModSettingsButtonTone.Normal,
+                    S("settings.voice.fetch.desc",
+                        "Asks MiniMax which voices the account can use (system, cloned and designed)."))
+                    .WithEntryVisibleWhen("voice_fetch", () => AiSettingsStore.Current.EnableVoice)
+                .AddButton("voice_test", S("settings.voice.test.label", "Preview"),
+                    S("settings.voice.test.button", "Play sample"), TestVoice,
+                    ModSettingsButtonTone.Accent,
+                    S("settings.voice.test.desc", "Synthesizes one short line so you can hear the selected voice."))
+                    .WithEntryVisibleWhen("voice_test", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_speed", S("settings.voice.speed", "Speed"), VoiceSpeedPercent,
+                    50, 200, 5, valueFormatter: value => value + "%",
+                    description: S("settings.voice.speed.desc", "100% is the voice's natural pace."))
+                    .WithEntryVisibleWhen("voice_speed", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_pitch", S("settings.voice.pitch", "Pitch"), VoicePitch,
+                    -12, 12, 1, description: S("settings.voice.pitch.desc", "0 keeps the original pitch."))
+                    .WithEntryVisibleWhen("voice_pitch", () => AiSettingsStore.Current.EnableVoice)
+                .AddChoice("voice_emotion", S("settings.voice.emotion", "Emotion"), VoiceEmotion,
+                    MiniMaxTtsClient.KnownEmotions.Select(emotion => new ModSettingsChoiceOption<string>(emotion,
+                        ModSettingsText.Literal(emotion == "auto"
+                            ? AiLoc.T("settings.voice.emotion.auto", "auto (model decides)")
+                            : emotion))),
+                    description: S("settings.voice.emotion.desc",
+                        "Leave on auto unless a voice needs a fixed mood. Some values only exist on newer models."),
+                    presentation: ModSettingsChoicePresentation.Dropdown)
+                    .WithEntryVisibleWhen("voice_emotion", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_volume", S("settings.voice.volume", "Voice volume"), VoiceVolumeDb,
+                    TtsAudioBus.MinVolumeDb, TtsAudioBus.MaxVolumeDb, 2,
+                    valueFormatter: value => value.ToString("+0;-0;0") + " dB",
+                    description: S("settings.voice.volume.desc",
+                        "The voice has its own audio channel, so the game's sound-effects volume no longer applies. Positive values make it louder (a built-in compressor + limiter keeps it clean); MiniMax output is quiet, so +6 dB is the default and +12 dB is loud."))
+                    .WithEntryVisibleWhen("voice_volume", () => AiSettingsStore.Current.EnableVoice)
+                .AddToggle("voice_chat_only", S("settings.voice.chat_only", "Only read replies to your chat"), VoiceChatOnly,
+                    description: S("settings.voice.chat_only.desc",
+                        "On: only lines written in answer to a player message. Off: combat chatter and unprompted lines are read as well."))
+                    .WithEntryVisibleWhen("voice_chat_only", () => AiSettingsStore.Current.EnableVoice)
+                .AddToggle("voice_danmaku",
+                    S("settings.voice.danmaku", "Read the AI's own live-danmaku replies"), VoiceReadDanmaku,
+                    description: S("settings.voice.danmaku.desc",
+                        "Speaks the short lines the AI posts to your Bilibili live room. Viewer danmaku is never read aloud — a scrolling chat would talk over the game and drain the character budget."))
+                    .WithEntryVisibleWhen("voice_danmaku",
+                        () => AiSettingsStore.Current.EnableVoice && AiSettingsStore.Current.EnableBilibiliDanmaku)
+                .AddIntSlider("voice_max_chars", S("settings.voice.max_chars", "Max characters per request"), VoiceMaxChars,
+                    20, 300, 10, description: S("settings.voice.max_chars.desc",
+                        "Longer replies are split into pieces. MiniMax bills per character."))
+                    .WithEntryVisibleWhen("voice_max_chars", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_rpm", S("settings.voice.rpm", "Requests per minute"), VoiceRequestsPerMinute,
+                    1, 20, 1, description: S("settings.voice.rpm.desc",
+                        "MiniMax allows 10 requests/min for free accounts and 20/min for paid ones; stay below that."))
+                    .WithEntryVisibleWhen("voice_rpm", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_budget_run", S("settings.voice.budget_run", "Characters per run (0 = unlimited)"),
+                    VoiceBudgetCharsPerRun, 0, 200000, 1000,
+                    description: S("settings.voice.budget_run.desc",
+                        "Billed characters; one Chinese character counts as two. ~10k characters ≈ ¥2 with a turbo model."))
+                    .WithEntryVisibleWhen("voice_budget_run", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_budget_hour", S("settings.voice.budget_hour", "Characters per hour (0 = unlimited)"),
+                    VoiceBudgetCharsPerHour, 0, 50000, 500,
+                    description: S("settings.voice.budget_hour.desc", "A hard stop against runaway spending."))
+                    .WithEntryVisibleWhen("voice_budget_hour", () => AiSettingsStore.Current.EnableVoice)
+                .AddToggle("voice_host_only", S("settings.voice.host_only", "Only the host plays voice"), VoiceHostOnly,
+                    description: S("settings.voice.host_only.desc",
+                        "Every client synthesizes its own audio, so a multiplayer game is billed once per listening player. Turn this on to keep it to the host."))
+                    .WithEntryVisibleWhen("voice_host_only", () => AiSettingsStore.Current.EnableVoice)
+                .AddToggle("voice_interrupt", S("settings.voice.interrupt", "New lines interrupt the previous one"), VoiceInterrupt)
+                    .WithEntryVisibleWhen("voice_interrupt", () => AiSettingsStore.Current.EnableVoice)
+                .AddToggle("voice_cache", S("settings.voice.cache", "Cache synthesized audio"), VoiceCacheEnabled,
+                    description: S("settings.voice.cache.desc", "A cached line replays instantly and costs nothing."))
+                    .WithEntryVisibleWhen("voice_cache", () => AiSettingsStore.Current.EnableVoice)
+                .AddIntSlider("voice_cache_files", S("settings.voice.cache_files", "Cache file limit"), VoiceCacheMaxFiles,
+                    20, 2000, 20)
+                    .WithEntryVisibleWhen("voice_cache_files",
+                        () => AiSettingsStore.Current.EnableVoice && AiSettingsStore.Current.VoiceCacheEnabled)
+                .AddIntSlider("voice_cache_mb", S("settings.voice.cache_mb", "Cache size limit (MB)"), VoiceCacheMaxMegabytes,
+                    5, 500, 5)
+                    .WithEntryVisibleWhen("voice_cache_mb",
+                        () => AiSettingsStore.Current.EnableVoice && AiSettingsStore.Current.VoiceCacheEnabled)
+                .AddButton("voice_clear_cache", S("settings.voice.clear_cache.label", "Voice cache"),
+                    S("settings.voice.clear_cache.button", "Clear"), ClearVoiceCache,
+                    ModSettingsButtonTone.Danger)
+                    .WithEntryVisibleWhen("voice_clear_cache", () => AiSettingsStore.Current.EnableVoice)
+                .AddButton("voice_clear_key", S("settings.voice.clear_key.label", "MiniMax API key"),
+                    S("settings.voice.clear_key.button", "Clear key"), ClearMiniMaxApiKey,
+                    ModSettingsButtonTone.Normal)
+                    .WithEntryVisibleWhen("voice_clear_key", () => AiSettingsStore.Current.EnableVoice)
+                .AddParagraph("voice_status", ModSettingsText.Dynamic(TtsService.Instance.DescribeStatus))
+                    .WithEntryVisibleWhen("voice_status", () => AiSettingsStore.Current.EnableVoice);
+    private static void ConfigureLive(ModSettingsSectionBuilder section) => section
                 .AddToggle("live_enabled", S("settings.live.enabled", "Show live-room danmaku"), EnableBilibiliDanmaku,
                     description: S("settings.live.enabled.desc",
                         "Connects to the room and scrolls its danmaku across the game screen. Receiving danmaku needs no Bilibili login; sending (and AI replies) does."))
@@ -458,10 +710,8 @@ public static class AiSettingsPage
                 .AddIntSlider("live_ai_batch", S("settings.live.ai_batch", "Danmaku per AI reply"),
                     DanmakuAiChatBatchSize, 1, 20, 1)
                     .WithEntryVisibleWhen("live_ai_batch",
-                        () => AiSettingsStore.Current.EnableBilibiliDanmaku && AiSettingsStore.Current.EnableDanmakuAiChat)
-            )
-            .AddSection("solo", section => section
-                .WithTitle(S("settings.section.solo", "Solo Climb"))
+                        () => AiSettingsStore.Current.EnableBilibiliDanmaku && AiSettingsStore.Current.EnableDanmakuAiChat);
+    private static void ConfigureSolo(ModSettingsSectionBuilder section) => section
                 .AddToggle("solo_mode", S("settings.solo.enabled", "AI climbs alone (singleplayer)"), EnableSoloClimb,
                     description: S("settings.solo.enabled.desc", "When enabled, the AI takes over singleplayer runs; interrupt or pause it from the chat box at any time."))
                 .AddDynamicChoice("solo_character", S("settings.solo.character", "AI character"), SoloCharacter,
@@ -481,10 +731,8 @@ public static class AiSettingsPage
                 .AddButton("solo_pause", S("settings.solo.pause.label", "Pause / Resume AI"),
                     S("settings.solo.pause.button", "Toggle"), ToggleSoloPause,
                     ModSettingsButtonTone.Normal,
-                    S("settings.solo.pause.desc", "Pause or resume the AI's automation now (also available from the chat panel)."))
-            )
-            .AddSection("agent", section => section
-                .WithTitle(S("settings.section.agent", "External Agent (dsh)"))
+                    S("settings.solo.pause.desc", "Pause or resume the AI's automation now (also available from the chat panel)."));
+    private static void ConfigureAgent(ModSettingsSectionBuilder section) => section
                 .AddToggle("agent_bridge", S("settings.agent.enabled", "Enable external agent bridge"), EnableAgentBridge,
                     description: S("settings.agent.enabled.desc",
                         "Opens a localhost-only port that the dsh plugin connects to. The external agent can read the game and, if allowed below, play it."))
@@ -529,10 +777,8 @@ public static class AiSettingsPage
                 .AddMultilineString("agent_launch_prompt", S("settings.agent.launch.prompt", "First message"),
                     AgentLaunchPrompt,
                     S("settings.agent.launch.prompt.desc",
-                        "Sent as the first user message of the new conversation. Placeholders: {Host}, {Port}, {Token}, {Workspace}, {Character}."))
-            )
-            .AddSection("maintenance", section => section
-                .WithTitle(S("settings.section.maintenance", "Maintenance"))
+                        "Sent as the first user message of the new conversation. Placeholders: {Host}, {Port}, {Token}, {Workspace}, {Character}."));
+    private static void ConfigureMaintenance(ModSettingsSectionBuilder section) => section
                 .AddToggle("auto_cache", S("settings.maintenance.auto_cache", "Auto-refresh content cache"), AutoRefreshCache,
                     description: S("settings.maintenance.auto_cache.desc", "Regenerate the card, relic, and potion index when the game version changes."))
                 .AddButton("regen_cache", S("settings.maintenance.cache.label", "Content cache"),
@@ -547,9 +793,7 @@ public static class AiSettingsPage
                 .AddButton("reset_defaults", S("settings.maintenance.reset.label", "Reset all settings"),
                     S("settings.maintenance.reset.button", "Reset"), ResetToDefaults,
                     ModSettingsButtonTone.Danger,
-                    S("settings.maintenance.reset.desc", "Restore all settings to defaults (including API keys); personality data is kept."))
-            ));
-    }
+                    S("settings.maintenance.reset.desc", "Restore all settings to defaults (including API keys); personality data is kept."));
 
     private static bool IsBackend(string name) =>
         string.Equals(AiSettingsStore.Current.ActiveBackend, name, StringComparison.Ordinal);
@@ -824,6 +1068,100 @@ public static class AiSettingsPage
                 "Could not remove the API key: {Error}", ("Error", ex.Message)));
         }
     }
+
+    // ---- Voice (MiniMax TTS) ------------------------------------------------
+
+    /// <summary>Dropdown options for the fetched voice list; always contains the current id.</summary>
+    private static IReadOnlyList<ModSettingsChoiceOption<string>> BuildVoiceOptions()
+    {
+        var current = AiSettingsStore.Current.VoiceId;
+        var voices = TtsVoiceCatalog.All;
+        var options = new List<ModSettingsChoiceOption<string>>();
+
+        if (voices.Count == 0)
+        {
+            var fallback = string.IsNullOrWhiteSpace(current) ? MiniMaxTtsClient.DefaultVoiceId : current;
+            options.Add(new ModSettingsChoiceOption<string>(fallback,
+                ModSettingsText.Dynamic(() => AiLoc.T("settings.voice.pick.empty",
+                    "No voices fetched yet — click “Fetch voices”"))));
+            return options;
+        }
+
+        var known = new HashSet<string>(StringComparer.Ordinal);
+        if (!string.IsNullOrWhiteSpace(current) && known.Add(current))
+            options.Add(new ModSettingsChoiceOption<string>(current, ModSettingsText.Literal(current)));
+
+        foreach (var voice in voices)
+        {
+            if (!known.Add(voice.VoiceId))
+                continue;
+
+            options.Add(new ModSettingsChoiceOption<string>(voice.VoiceId,
+                ModSettingsText.Literal($"{voice.VoiceName} · {voice.VoiceId}")));
+        }
+
+        return options;
+    }
+
+    private static void TestVoice(IModSettingsUiActionHost host)
+    {
+        RitsuToastService.ShowInfo(AiLoc.T("toast.voice_testing", "正在合成试听语音…"));
+        _ = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+            var (ok, message) = await TtsService.Instance.PreviewAsync(cts.Token);
+            MainThread.Post(() =>
+            {
+                if (ok)
+                    RitsuToastService.ShowInfo(message);
+                else
+                    RitsuToastService.ShowError(message);
+                RequestRefresh(host);
+            });
+        });
+    }
+
+    private static void FetchVoices(IModSettingsUiActionHost host)
+    {
+        RitsuToastService.ShowInfo(AiLoc.T("toast.voice_fetching", "正在向 MiniMax 查询可用音色…"));
+        _ = Task.Run(async () =>
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var (ok, message) = await TtsService.Instance.FetchVoicesAsync(cts.Token);
+            MainThread.Post(() =>
+            {
+                if (ok)
+                    RitsuToastService.ShowInfo(message);
+                else
+                    RitsuToastService.ShowError(message);
+                RequestRefresh(host);
+            });
+        });
+    }
+
+    private static void ClearVoiceCache(IModSettingsUiActionHost host)
+    {
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                TtsAudioCache.Clear();
+                MainThread.Post(() =>
+                {
+                    RequestRefresh(host);
+                    RitsuToastService.ShowInfo(AiLoc.T("toast.voice_cache_cleared", "语音缓存已清空。"));
+                });
+            }
+            catch (Exception ex)
+            {
+                MainThread.Post(() => RitsuToastService.ShowError(AiLoc.T("toast.voice_cache_clear_failed",
+                    "清空语音缓存失败：{Error}", ("Error", ex.Message))));
+            }
+        });
+    }
+
+    private static void ClearMiniMaxApiKey(IModSettingsUiActionHost host) =>
+        ClearApiKey(host, MiniMaxApiKey, s => s.MiniMaxApiKey = "");
 
     private static void CreatePersonality(IModSettingsUiActionHost host)
     {

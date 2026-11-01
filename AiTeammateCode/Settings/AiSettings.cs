@@ -18,6 +18,17 @@ public enum DanmakuDirection
 /// </summary>
 public sealed class AiSettings
 {
+    /// <summary>
+    /// Schema version written into <c>settings.json</c>. Files from before the field existed read
+    /// back as 0, which is how <see cref="AiSettingsStore"/> knows it may apply one-off default
+    /// migrations (a changed default alone never reaches an existing settings file).
+    /// 设置文件结构版本；旧文件为 0，用于一次性默认值迁移。
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
+
+    /// <summary>Version of this settings file. 当前设置文件版本。</summary>
+    public int SettingsSchemaVersion { get; set; }
+
     // ---- AI backend ----
 
     /// <summary>Active backend name: DeepSeek / OpenAI / Ollama. 当前使用的 AI 后端。</summary>
@@ -128,6 +139,86 @@ public sealed class AiSettings
     public int ChatCooldownMs { get; set; } = 15000;
     public int MaxChatHistoryForPrompt { get; set; } = 10;
 
+    // ---- Voice (MiniMax TTS) ----
+
+    /// <summary>Reads AI lines aloud through MiniMax text-to-speech. 用 MiniMax 语音朗读 AI 台词。</summary>
+    public bool EnableVoice { get; set; }
+
+    /// <summary>MiniMax API key (write-only in the UI, like the backend keys). MiniMax 接口密钥。</summary>
+    public string MiniMaxApiKey { get; set; } = "";
+
+    /// <summary>
+    /// MiniMax endpoint; the north-China host <c>https://api-bj.minimaxi.com</c> answers faster for
+    /// mainland players. 语音接口地址。
+    /// </summary>
+    public string MiniMaxBaseUrl { get; set; } = "https://api.minimax.cn";
+
+    /// <summary>TTS model id. <c>speech-2.8-turbo</c> is the fast/cheap default. 语音模型。</summary>
+    public string VoiceModel { get; set; } = "speech-2.8-turbo";
+
+    /// <summary>Voice id; cloned and designed voices use the same field. 音色 ID。</summary>
+    public string VoiceId { get; set; } = "male-qn-qingse";
+
+    /// <summary>Speech speed in percent, 50–200. 语速（百分比）。</summary>
+    public int VoiceSpeedPercent { get; set; } = 100;
+
+    /// <summary>Pitch shift, -12..12. 音调。</summary>
+    public int VoicePitch { get; set; }
+
+    /// <summary>Emotion for the voice; <c>auto</c> lets the model pick. 情绪。</summary>
+    public string VoiceEmotion { get; set; } = "auto";
+
+    /// <summary>
+    /// Volume of the dedicated voice bus in dB. The voice no longer rides the game's SFX bus
+    /// (which the game attenuates by <c>slider²</c>), and MiniMax output sits around -19.5 LUFS,
+    /// so the default is a positive offset rather than 0. 语音音量：独立语音总线的增益（dB）。
+    /// </summary>
+    public int VoiceVolumeDb { get; set; } = 6;
+
+    /// <summary>
+    /// Only read replies to a player chat message; combat chatter and unprompted small talk stay
+    /// silent. On by default. 只朗读玩家聊天回复，不读战斗台词。
+    /// </summary>
+    public bool VoiceChatOnly { get; set; } = true;
+
+    /// <summary>
+    /// Also read aloud the short replies the AI posts to a Bilibili live room. Viewer danmaku is
+    /// never spoken (a scrolling chat would talk over the game and burn the budget).
+    /// 朗读 AI 自己发出的直播弹幕；观众弹幕不读。
+    /// </summary>
+    public bool VoiceReadDanmaku { get; set; } = true;
+
+    /// <summary>Longest text sent in one synthesis request, in characters. 单次合成最大字数。</summary>
+    public int VoiceMaxChars { get; set; } = 120;
+
+    /// <summary>Client-side request cap per minute (MiniMax allows 10 free / 20 paid). 每分钟请求数。</summary>
+    public int VoiceRequestsPerMinute { get; set; } = 12;
+
+    /// <summary>Billed-character budget per run, 0 = unlimited. 每局字符预算。</summary>
+    public int VoiceBudgetCharsPerRun { get; set; } = 20000;
+
+    /// <summary>Billed-character budget per hour, 0 = unlimited. 每小时字符预算。</summary>
+    public int VoiceBudgetCharsPerHour { get; set; } = 8000;
+
+    /// <summary>
+    /// Only the host plays voice. Off by default: every client synthesizes its own audio, so the
+    /// AI's voice is heard by everyone, at the cost of one request per listening client.
+    /// 仅房主播放语音（默认关：每人都能听到）。
+    /// </summary>
+    public bool VoiceHostOnly { get; set; }
+
+    /// <summary>Cut the previous line when a new one starts. 新台词打断旧台词。</summary>
+    public bool VoiceInterrupt { get; set; } = true;
+
+    /// <summary>Cache synthesized audio on disk; a hit costs nothing. 语音缓存。</summary>
+    public bool VoiceCacheEnabled { get; set; } = true;
+
+    /// <summary>Maximum cached audio files. 缓存文件上限。</summary>
+    public int VoiceCacheMaxFiles { get; set; } = 300;
+
+    /// <summary>Maximum cache size in megabytes. 缓存大小上限（MB）。</summary>
+    public int VoiceCacheMaxMegabytes { get; set; } = 30;
+
     // ---- Solo climb ----
 
     /// <summary>Lets the AI drive the local player in singleplayer runs. 单人模式由 AI 接管。</summary>
@@ -204,6 +295,7 @@ public sealed class AiSettings
     {
         var defaults = new AiSettings();
 
+        SettingsSchemaVersion = CurrentSchemaVersion;
         ActiveBackend = defaults.ActiveBackend;
         DeepSeekApiKey = defaults.DeepSeekApiKey;
         DeepSeekModel = defaults.DeepSeekModel;
@@ -251,6 +343,27 @@ public sealed class AiSettings
         EnableSpeechBubble = defaults.EnableSpeechBubble;
         ChatCooldownMs = defaults.ChatCooldownMs;
         MaxChatHistoryForPrompt = defaults.MaxChatHistoryForPrompt;
+
+        EnableVoice = defaults.EnableVoice;
+        MiniMaxApiKey = defaults.MiniMaxApiKey;
+        MiniMaxBaseUrl = defaults.MiniMaxBaseUrl;
+        VoiceModel = defaults.VoiceModel;
+        VoiceId = defaults.VoiceId;
+        VoiceSpeedPercent = defaults.VoiceSpeedPercent;
+        VoicePitch = defaults.VoicePitch;
+        VoiceEmotion = defaults.VoiceEmotion;
+        VoiceVolumeDb = defaults.VoiceVolumeDb;
+        VoiceChatOnly = defaults.VoiceChatOnly;
+        VoiceReadDanmaku = defaults.VoiceReadDanmaku;
+        VoiceMaxChars = defaults.VoiceMaxChars;
+        VoiceRequestsPerMinute = defaults.VoiceRequestsPerMinute;
+        VoiceBudgetCharsPerRun = defaults.VoiceBudgetCharsPerRun;
+        VoiceBudgetCharsPerHour = defaults.VoiceBudgetCharsPerHour;
+        VoiceHostOnly = defaults.VoiceHostOnly;
+        VoiceInterrupt = defaults.VoiceInterrupt;
+        VoiceCacheEnabled = defaults.VoiceCacheEnabled;
+        VoiceCacheMaxFiles = defaults.VoiceCacheMaxFiles;
+        VoiceCacheMaxMegabytes = defaults.VoiceCacheMaxMegabytes;
 
         EnableSoloClimb = defaults.EnableSoloClimb;
         SoloCharacterId = defaults.SoloCharacterId;

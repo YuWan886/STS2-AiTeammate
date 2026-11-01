@@ -15,6 +15,9 @@ internal static class ModPaths
     public const string CacheDir = RootDir + "/cache";
     public const string MemoryDir = RootDir + "/memories";
 
+    /// <summary>MiniMax TTS audio cache (one file per unique line/voice combination). TTS 语音缓存。</summary>
+    public const string VoiceDir = RootDir + "/voice";
+
     /// <summary>Creates <paramref name="path"/> and any missing parents. True when it exists afterwards.</summary>
     public static bool EnsureDir(string path)
     {

@@ -1,4 +1,4 @@
-﻿using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Players;
 using AiTeammate.AiTeammateCode;
 using AiTeammate.AiTeammateCode.Backend;
@@ -85,7 +85,7 @@ public class ChatManager
         OnMessageReceived?.Invoke(msg);
     }
 
-    public ChatMessage? AddAiMessage(string content)
+    public ChatMessage? AddAiMessage(string content, ChatMessageSource source = ChatMessageSource.Other)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
         var msg = new ChatMessage
@@ -93,7 +93,8 @@ public class ChatManager
             SenderName = AiNames.DisplayName,
             IsAi = true,
             Content = content.Trim(),
-            Type = ChatMessageType.Normal
+            Type = ChatMessageType.Normal,
+            Source = source
         };
         AddRecent(msg);
         OnMessageReceived?.Invoke(msg);
@@ -243,7 +244,8 @@ public class ChatManager
             SenderName = AiNames.DisplayName,
             IsAi = true,
             Content = replyContent,
-            Type = ChatMessageType.Normal
+            Type = ChatMessageType.Normal,
+            Source = ChatMessageSource.ChatReply
         };
         AddRecent(aiMsg);
         OnMessageReceived?.Invoke(aiMsg);
@@ -288,7 +290,7 @@ public class ChatManager
             }
         }
 
-        var message = AddAiMessage(text);
+        var message = AddAiMessage(text, ChatMessageSource.ChatReply);
         if (message != null)
             AiTeammateManager.Instance?.AiLog.LogChat(message.SenderName, message.Content);
         return message;
@@ -395,7 +397,8 @@ public class ChatManager
             SenderName = AiNames.DisplayName,
             IsAi = true,
             Content = response.Content.Trim(),
-            Type = ChatMessageType.Normal
+            Type = ChatMessageType.Normal,
+            Source = ChatMessageSource.Auto
         };
         AddRecent(msg);
         OnMessageReceived?.Invoke(msg);
