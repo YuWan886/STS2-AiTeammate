@@ -457,9 +457,20 @@ public class AiTeammateManager
 
     public List<CharacterModel> GetAiCharacterOptions()
     {
-        return ModelDb.AllCharacters
-            .Where(c => c is not RandomCharacter && !c.Id.Entry.Contains("Random", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        try
+        {
+            return ModelDb.AllCharacters
+                .Where(c => c is not RandomCharacter && !c.Id.Entry.Contains("Random", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+        catch (KeyNotFoundException)
+        {
+            // The settings page is registered while the game is still starting up, before
+            // ModelDb.Initialize() fills its model dictionary, so Character<T>() throws here.
+            // Report "no characters yet" instead of a warning; the settings UI and the dsh bridge
+            // call this provider again once the models exist.
+            return new List<CharacterModel>();
+        }
     }
 
     /// <summary>

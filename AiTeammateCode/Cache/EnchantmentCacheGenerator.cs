@@ -12,13 +12,21 @@ public class EnchantmentCacheGenerator
         {
             var id = e.Id.Entry;
             if (string.IsNullOrWhiteSpace(id)) continue;
-            var name = PromptTextHelper.ResolveLocString(e.Title, id);
-            var description = PromptTextHelper.ResolveLocString(e.DynamicDescription, "");
-            entries[id] = new EnchantIndexEntry
+
+            try
             {
-                Name = name,
-                OneLiner = ExtractOneLiner(description)
-            };
+                var name = PromptTextHelper.ResolveLocString(e.Title, id);
+                var description = PromptTextHelper.ResolveLocString(e.DynamicDescription, "");
+                entries[id] = new EnchantIndexEntry
+                {
+                    Name = name,
+                    OneLiner = ExtractOneLiner(description)
+                };
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[Cache] enchantment '{id}' skipped: {ex.Message}");
+            }
         }
         return entries;
     }
@@ -31,12 +39,20 @@ public class EnchantmentCacheGenerator
         {
             var id = e.Id.Entry;
             if (string.IsNullOrWhiteSpace(id)) continue;
-            var name = PromptTextHelper.ResolveLocString(e.Title, id);
-            entries[id] = new EnchantFullEntry
+
+            try
             {
-                Name = name,
-                Description = PromptTextHelper.ResolveLocString(e.DynamicDescription, "")
-            };
+                var name = PromptTextHelper.ResolveLocString(e.Title, id);
+                entries[id] = new EnchantFullEntry
+                {
+                    Name = name,
+                    Description = PromptTextHelper.ResolveLocString(e.DynamicDescription, "")
+                };
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[Cache] enchantment '{id}' skipped: {ex.Message}");
+            }
         }
         return entries;
     }

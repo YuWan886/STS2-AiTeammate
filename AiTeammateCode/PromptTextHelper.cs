@@ -44,11 +44,20 @@ internal static class PromptTextHelper
 
         return OnMainThread(() =>
         {
+            // GetDescriptionForPile is the exact path the game UI uses: it adds every variable a
+            // description may reference (OnTable/InCombat/TargetType/GainsBlock/energyPrefix/...),
+            // including the conditional selectors introduced in 0.111 and the per-card extras from
+            // AddExtraArgsToDescription. Rebuilding the LocString by hand misses those and makes
+            // SmartFormat log a LocException ("No source extension could handle the selector named
+            // ...") for every such card, so only fall back when that authoritative text is unusable.
             var pileDesc = TryGet(() => card.GetDescriptionForPile(pile));
-            var offlineFormatted = TryGet(() => FormatCardDescriptionOffline(card, card.IsUpgraded));
-            var raw = TryGet(() => card.Description?.GetRawText());
+            if (IsCompleteDescription(pileDesc))
+                return CleanText(pileDesc);
+
+            var offline = TryGet(() => FormatCardDescriptionOffline(card, card.IsUpgraded));
             var rawWithVars = TryGet(() => ApplyVariableFallbacks(card, card.IsUpgraded));
-            return PickBestText(pileDesc, offlineFormatted, rawWithVars, raw, fallback);
+            var raw = TryGet(() => card.Description?.GetRawText());
+            return PickBestText(pileDesc, offline, rawWithVars, raw, fallback: fallback);
         }, fallback);
     }
 
@@ -121,6 +130,12 @@ internal static class PromptTextHelper
         return SuspiciousSuffixes.Any(suffix => text.EndsWith(suffix, StringComparison.Ordinal));
     }
 
+    /// <summary>True when the text is real prose with no leftover template placeholders.</summary>
+    private static bool IsCompleteDescription(string? text)
+    {
+        return !string.IsNullOrWhiteSpace(text) && !LooksMalformedCardText(text);
+    }
+
     private static bool ShouldAttemptFormatting(LocString loc, string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw) || loc.Variables.Count == 0)
@@ -143,7 +158,24 @@ internal static class PromptTextHelper
         catch { return null; }
     }
 
-    private static string FormatCardDescriptionOffline(CardModel card, bool upgraded)
+    /// <summary>
+    /// Formats a card description without a live combat context. Only used when the in-game path
+    /// (<see cref="CardModel.GetDescriptionForPile"/>) produced nothing usable. Returns null when
+    /// the description references selectors this builder cannot supply — the conditional syntax
+    /// 0.111 introduced ({CardType:...}, {GainsBlock:...}, ...) and per-card extras supplied by
+    /// AddExtraArgsToDescription — because SmartFormat would then log a LocException per card.
+    /// </summary>
+    private static string? FormatCardDescriptionOffline(CardModel card, bool upgraded)
+    {
+        var description = BuildOfflineDescription(card, upgraded);
+        var raw = description.GetRawText();
+        if (!ShouldAttemptFormatting(description, raw))
+            return null;
+
+        return description.GetFormattedText();
+    }
+
+    private static LocString BuildOfflineDescription(CardModel card, bool upgraded)
     {
         var description = new LocString("cards", card.Id.Entry + ".description");
         card.DynamicVars.AddTo(description);
@@ -161,21 +193,12 @@ internal static class PromptTextHelper
                 energyVar.ColorPrefix = "";
         }
 
-        return description.GetFormattedText();
+        return description;
     }
 
     private static string ApplyVariableFallbacks(CardModel card, bool upgraded)
     {
-        var description = new LocString("cards", card.Id.Entry + ".description");
-        card.DynamicVars.AddTo(description);
-        description.Add(new IfUpgradedVar(upgraded ? UpgradeDisplay.Upgraded : UpgradeDisplay.Normal));
-        description.Add("OnTable", true);
-        description.Add("InCombat", false);
-        description.Add("IsTargeting", false);
-        description.Add("TargetType", card.TargetType.ToString());
-        description.Add("energyPrefix", "");
-        description.Add("singleStarIcon", AiLoc.Pick("辉星", "Star"));
-
+        var description = BuildOfflineDescription(card, upgraded);
         var raw = description.GetRawText();
         var result = PlaceholderTokenRegex.Replace(raw, match =>
         {
