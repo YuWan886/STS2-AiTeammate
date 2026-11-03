@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Runs;
 using AiTeammate.AiTeammateCode.Solo;
 using AiTeammate.AiTeammateCode.Decision;
+using AiTeammate.AiTeammateCode.Compat;
 
 namespace AiTeammate.AiTeammateCode.Patches;
 
@@ -125,17 +126,20 @@ public static class EventAutoChoicePatch
     }
 
     /// <summary>
-    /// A page is identified by the event id plus its current option titles. Pages are just swapped
+    /// A page is identified by the event id plus its current option keys. Pages are just swapped
     /// option sets on <see cref="EventModel"/> (there is no page index for non-shared events), so the
-    /// titles are what actually changes when the event moves on.
+    /// options are what actually changes when the event moves on.
+    /// <c>TextKey</c> is used instead of the localized title so two peers running different
+    /// languages still derive the same key for a synchronized AI decision.
     /// </summary>
     private static string Fingerprint(EventModel? aiEvent)
     {
         try
         {
             if (aiEvent?.CurrentOptions == null) return "";
-            var titles = string.Join("|", aiEvent.CurrentOptions.Select(o => o.Title.SafeText(aiEvent)));
-            return $"{aiEvent.Id.Entry}#{aiEvent.CurrentOptions.Count}#{titles}";
+            var keys = string.Join("|", aiEvent.CurrentOptions.Select(o =>
+                string.IsNullOrWhiteSpace(o.TextKey) ? o.Title.SafeText(aiEvent) : o.TextKey));
+            return $"{aiEvent.Id.Entry}#{aiEvent.CurrentOptions.Count}#{keys}";
         }
         catch
         {
@@ -202,6 +206,15 @@ public static class EventAutoChoicePatch
         if (Interlocked.CompareExchange(ref _decisionInFlight, 1, 0) != 0)
             return;
 
+        // Identical page identity on every peer: event id + the option titles of the current page.
+        var pageKey = "";
+        try
+        {
+            var currentEvent = eventSync.GetEventForPlayer(aiPlayer);
+            pageKey = Fingerprint(currentEvent);
+        }
+        catch { /* the task re-reads the event on the main thread */ }
+
         _ = Task.Run(async () =>
         {
             var handedOff = false;
@@ -211,8 +224,39 @@ public static class EventAutoChoicePatch
                 if (SoloRunController.IsActive)
                     await AiFlowControl.WaitWhilePausedAsync();
 
-                var (choice, reason) = await manager.DecisionService.DecideEventAsync(
-                    aiPlayer, optionDescs, CancellationToken.None);
+                int choice;
+                string reason;
+                if (!AiMultiplayer.RequiresDecisionSync || AiMultiplayer.IsAuthority)
+                {
+                    (choice, reason) = await manager.DecisionService.DecideEventAsync(
+                        aiPlayer, optionDescs, CancellationToken.None);
+
+                    // The host's choice is the only one that may advance the AI's event: a second
+                    // LLM answer on a client would apply different relic/card/HP effects there.
+                    if (AiMultiplayer.RequiresDecisionSync)
+                    {
+                        if (choice < 0 || choice >= optionDescs.Count) choice = 0;
+                        AiSyncBus.Publish(AiSyncBus.KindChoice, "event:" + pageKey, choice.ToString());
+                    }
+                }
+                else
+                {
+                    // Follower: mirror the host's choice for the same event page.
+                    AiSyncBus.EnsureRegistered();
+                    var payload = await AiSyncBus.AwaitAsync(
+                        AiSyncBus.KindChoice, "event:" + pageKey, TimeSpan.FromSeconds(30));
+                    if (int.TryParse(payload, out var hostChoice) && hostChoice >= 0 && hostChoice < optionDescs.Count)
+                    {
+                        choice = hostChoice;
+                        reason = "跟随房主决策";
+                    }
+                    else
+                    {
+                        choice = 0;
+                        reason = "未收到房主事件决策，使用默认选项";
+                        manager.AiLog.LogDecisionFailure("事件决策未同步，使用默认选项");
+                    }
+                }
 
                 // Validate against captured option count, clamp if needed
                 if (choice < 0 || choice >= optionDescs.Count) choice = 0;
@@ -262,6 +306,14 @@ public static class EventAutoChoicePatch
                         // next DecideAndApplyAsync call would be rejected as a duplicate.
                         Interlocked.Exchange(ref _decisionInFlight, 0);
                         ContinueEventResolution(eventSync, aiPlayer, manager, resumeDepth);
+
+                        // The option's effect may resolve asynchronously (screens, rewards). Give it
+                        // a moment, then let the clients adopt the host's authoritative AI state.
+                        if (AiMultiplayer.IsAuthority && AiMultiplayer.IsNetworked)
+                        {
+                            _ = Task.Delay(1500).ContinueWith(_ => MainThread.Post(
+                                () => AiStateSync.BroadcastFromAuthority("event")));
+                        }
                     }
                     catch (System.Exception ex)
                     {

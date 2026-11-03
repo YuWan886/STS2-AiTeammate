@@ -130,6 +130,9 @@ public static class CombatManagerPatch
         if (!manager.IsInitialized || manager.AiPlayer == null)
             return;
 
+        // A snapshot that arrived during the fight could not be applied safely; adopt it now.
+        Compat.AiStateSync.ApplyPendingIfSafe("combat-won");
+
         _ = manager.OnCombatWon();
     }
 

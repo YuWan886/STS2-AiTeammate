@@ -263,6 +263,21 @@ public class AiTeammateManager
             MainFile.Logger.Warn($"[Nickname] 联机昵称同步初始化失败: {ex.Message}");
         }
 
+        // Multiplayer: register the AI replication channel and let the host seed every client with
+        // its authoritative copy of the AI player (deck/relics/relic grab bag included).
+        try
+        {
+            AiSyncBus.EnsureRegistered();
+            AiSyncBus.ResetForNewRun();
+            AiStateSync.ClearPending();
+            if (AiMultiplayer.IsAuthority)
+                MainThread.Post(() => AiStateSync.BroadcastFromAuthority("ai-joined"));
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Sync] AI 同步初始化失败: {ex.Message}");
+        }
+
         // A run with an AI teammate invites a running dsh to open a conversation and take over.
         AgentTakeoverInvite.OnAiPlayerJoined(aiPlayer.Character?.Id.Entry ?? "");
     }
@@ -360,6 +375,18 @@ public class AiTeammateManager
     {
         if (!IsInitialized) return null;
 
+        // One AI teammate at most. A second Add used to append another fake entry with the next
+        // slot's NetId; those ghosts stayed in the lobby list, inflated the player count and made
+        // vanilla targeted sends address peers that do not exist.
+        var existing = GetAiLobbyPlayer(lobby);
+        if (existing.HasValue)
+        {
+            if (character != null)
+                SetAiCharacter(lobby, character);
+            MainFile.Logger.Info("AI already in lobby, reusing the existing entry");
+            return GetAiLobbyPlayer(lobby);
+        }
+
         // Reset AI player for a new run (old reference is stale)
         AiPlayer = null;
 
@@ -407,12 +434,11 @@ public class AiTeammateManager
 
     public void RemoveAiFromLobby(StartRunLobby lobby)
     {
-        var aiPlayer = lobby.Players.FirstOrDefault(p =>
-            AiIdentity.IsAi(p.id));
-        if (aiPlayer.id != 0)
+        // Remove every AI entry, not just the first: older builds could leave duplicates behind.
+        var removed = lobby.Players.RemoveAll(p => AiIdentity.IsAi(p.id));
+        if (removed > 0)
         {
-            lobby.Players.Remove(aiPlayer);
-            MainFile.Logger.Info("AI removed from lobby");
+            MainFile.Logger.Info($"AI removed from lobby ({removed} entry/entries)");
         }
     }
 
@@ -529,6 +555,45 @@ public class AiTeammateManager
         if (AiPlayer != null) return;
 
         SoloRunController.TryBind(this);
+    }
+
+    /// <summary>
+    /// Produces one combat decision pass. The host runs the LLM and broadcasts the plan; every
+    /// client waits for that plan and executes it verbatim so both simulations stay identical.
+    /// Outside a networked multiplayer run this is just the normal local LLM call.
+    /// </summary>
+    private async Task<DecisionResult> DecideCombatPlanAsync(int decisionPass, CancellationToken ct)
+    {
+        var aiPlayer = AiPlayer;
+        if (aiPlayer == null)
+            return DecisionResult.Fallback();
+
+        if (!AiMultiplayer.RequiresDecisionSync)
+        {
+            return await Task.Run(async () => await DecisionService.DecideCombatAsync(aiPlayer, ct), ct);
+        }
+
+        if (AiMultiplayer.IsAuthority)
+        {
+            var own = await Task.Run(async () => await DecisionService.DecideCombatAsync(aiPlayer, ct), ct);
+            AiCombatPlanCodec.Publish(aiPlayer, decisionPass, own);
+            return own;
+        }
+
+        // Follower: mirror the host's plan. The hard turn budget (45 s) is the upper bound, so a
+        // missing plan means the host hit its own fallback — use the same deterministic fallback.
+        AiSyncBus.EnsureRegistered();
+        var key = AiCombatPlanCodec.Key(aiPlayer, decisionPass);
+        AiLog.Log("COMBAT", $"等待房主战斗决策 ({key})");
+        var json = await AiSyncBus.AwaitAsync(AiSyncBus.KindCombatPlan, key, TimeSpan.FromSeconds(40), ct);
+        var plan = AiCombatPlanCodec.Deserialize(json);
+        if (plan == null)
+        {
+            AiLog.LogDecisionFailure("未收到房主的战斗计划，使用本地兜底");
+            return DecisionResult.Fallback();
+        }
+
+        return plan;
     }
 
     public async Task ProcessCombatTurnAsync()
@@ -656,9 +721,11 @@ public class AiTeammateManager
                     AiLog.Log("COMBAT", $"检测到AI仍有能量和可打牌，继续发起第{decisionPass}次战斗决策");
                 }
 
-                // Run AI backend decision on background thread (HTTP call with timeout)
-                var result = await Task.Run(async () =>
-                    await DecisionService.DecideCombatAsync(AiPlayer, effectiveCt), effectiveCt);
+                // Run AI backend decision on background thread (HTTP call with timeout).
+                // In multiplayer only the host may call the LLM for the AI: cards are auto-played
+                // into each peer's local simulation (CardCmd.AutoPlay is never enqueued), so every
+                // peer must execute the exact same plan or the run diverges.
+                var result = await DecideCombatPlanAsync(decisionPass, effectiveCt);
 
                 // Log the AI's decision
                 if (result.IsFallback)
@@ -681,7 +748,7 @@ public class AiTeammateManager
                     // otherwise the visual effect lands after the first card play.
                     await Task.Delay(ChatManager.GetSpeechLeadInDelayMs(result.ChatMessage), effectiveCt);
                 }
-                else if (decisionPass == 1)
+                else if (decisionPass == 1 && AiMultiplayer.IsAuthority)
                 {
                     var autoMessage = await ChatManager.TryAutoMessage(AiPlayer, "AiTurnStart", effectiveCt);
                     if (autoMessage != null)

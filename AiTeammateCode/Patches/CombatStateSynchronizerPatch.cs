@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
@@ -44,6 +44,14 @@ public static class CombatStateSynchronizerPatch
                 continue;
             if (syncData == null || !syncData.ContainsKey(id))
                 return false; // still waiting for real players
+        }
+
+        // The AI itself is replicated over the mod channel. Do not finish the sync before the
+        // host's authoritative snapshot is in, or the first combat checksum compares stale state.
+        if (netService.Type == NetGameType.Client && AiStateSync.AwaitingCombatSnapshot
+            && !AiStateSync.IsCombatSnapshotOverdue)
+        {
+            return false;
         }
 
         if (rngSet != null)

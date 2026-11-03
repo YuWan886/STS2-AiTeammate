@@ -102,6 +102,16 @@ public static class RewardsSetOfferPatch
         if (!manager.IsInitialized || manager.AiPlayer == null) return true;
         if (__instance.Player.NetId != manager.AiPlayer.NetId) return true;
 
+        // Multiplayer followers do not claim the AI's rewards locally: the host owns the whole
+        // reward flow (LLM choice included) and replicates the resulting AI state afterwards.
+        // Running it on both peers with two different LLM answers is what desynced the run.
+        if (!AiMultiplayer.IsAuthority)
+        {
+            manager.AiLog.Log("REWARD", "非房主，跳过 AI 奖励结算（由房主结算并同步状态）");
+            __result = Task.CompletedTask;
+            return false;
+        }
+
         manager.AiLog.Log("REWARD", "拦截Offer()，跳过原始方法");
         __result = AutoClaimAiRewardsAsync(__instance, manager);
         return false;
@@ -215,36 +225,13 @@ public static class RewardsSetOfferPatch
                                 log.Log("REWARD", $"Deck counter refresh failed: {refreshEx.Message}");
                             }
 
-                            // Only sync if combat is fully over. During combat-to-reward
-                            // transitions, the combat state may not be cleaned up yet,
-                            // and syncing cards during combat is rejected by the game.
-                            if (CombatManager.Instance.IsOverOrEnding)
-                            {
-                                try
-                                {
-                                    RunManager.Instance.RewardSynchronizer.SyncLocalObtainedCard(result.cardAdded);
-
-                                    // Sync skipped cards
-                                    for (int i = 0; i < cards.Count; i++)
-                                    {
-                                        if (i != pick)
-                                            RunManager.Instance.RewardSynchronizer.SyncLocalSkippedCard(cards[i]);
-                                    }
-                                }
-                                catch (Exception syncEx)
-                                {
-                                    log.Log("REWARD", $"Card sync deferred (combat cleanup in progress): {syncEx.Message}");
-                                }
-                            }
-                            else
-                            {
-                                log.Log("REWARD", "Card sync skipped — combat still in progress, card added locally");
-                            }
+                            // Local-only: RewardSynchronizer stamps the sender's own NetId, so
+                            // broadcasting the AI's card would add it to the *host human's* deck on
+                            // the other peers. The AI state snapshot is the correct carrier.
                         }
                         else
                         {
                             log.Log("REWARD", "Card add failed, skipping card reward");
-                            RunManager.Instance.RewardSynchronizer.SyncLocalSkippedCard(chosenCard);
                         }
                     }
                     catch (Exception ex)
@@ -257,8 +244,6 @@ public static class RewardsSetOfferPatch
                     // Skip all cards
                     log.Log("AI_ACTION", $"跳过选牌 | {reason}");
                     log.Log("REWARD", "AI chose to skip card reward");
-                    foreach (var card in cards)
-                        RunManager.Instance.RewardSynchronizer.SyncLocalSkippedCard(card);
                 }
 
                 // Fire after-reward hook
@@ -270,6 +255,10 @@ public static class RewardsSetOfferPatch
 
             log.Log("REWARD", "AI reward processing complete");
             log.Log("AI_ACTION", "战斗奖励处理完成");
+
+            // The host owns this flow; push the final AI state (deck/gold/relics/potions/grab bag)
+            // to the clients so their local copies match before the next checksum.
+            Compat.AiStateSync.BroadcastFromAuthority("rewards");
 
             if (SoloRunController.IsActive)
             {
@@ -327,6 +316,14 @@ public static class MerchantRoomPatch
             return;
         }
 
+        // Multiplayer: the shop stock is rolled independently on every peer and purchases mutate the
+        // AI's gold/deck/relics, so only the host may buy. Clients receive the final state snapshot.
+        if (!Compat.AiMultiplayer.IsAuthority)
+        {
+            manager.AiLog.Log("SHOP", "非房主，跳过 AI 购物（由房主结算并同步状态）");
+            return;
+        }
+
         Compat.MainThread.Post(() => _ = RunShopAsync(manager, aiPlayer));
     }
 
@@ -340,6 +337,12 @@ public static class MerchantRoomPatch
         catch (Exception ex)
         {
             MainFile.Logger.Error($"Shop error: {ex.Message}");
+        }
+        finally
+        {
+            // Shop stock is rolled per peer from the AI's Shop/Rewards RNG; only the host buys, so
+            // push the resulting gold/deck/relics/potions to the clients.
+            Compat.AiStateSync.BroadcastFromAuthority("shop");
         }
     }
 }
@@ -481,22 +484,73 @@ public static class RestSiteBeginPatch
 
         // Let the LLM make the actual decision, including SMITH upgrade indices.
         // If it times out or returns invalid data, fall back to the safe local rule.
+        // Multiplayer: only the host asks the model; every peer applies the same choice so the spot
+        // heals/upgrades identically and each peer's rest-site synchronizer completes the AI's slot.
+        var restKey = Compat.AiChoiceCodec.Key("rest", aiPlayer.RunState?.TotalFloor ?? 0, string.Join(",", optionIds));
         _ = Task.Run(async () =>
         {
             RestSiteDecisionResult decision;
-            try
+            if (Compat.AiMultiplayer.RequiresDecisionSync && Compat.AiMultiplayer.IsFollower)
             {
-                using var cts = new CancellationTokenSource(5000); // 5s max for diagnostics
-                decision = await manager.DecisionService.DecideRestSiteAsync(
-                    aiPlayer, currentHp, maxHp, options, cts.Token);
-            }
-            catch
-            {
-                decision = new RestSiteDecisionResult
+                Compat.AiSyncBus.EnsureRegistered();
+                var payload = await Compat.AiSyncBus.AwaitAsync(
+                    Compat.AiSyncBus.KindChoice, restKey, TimeSpan.FromSeconds(20));
+                var dto = Compat.AiChoiceCodec.Deserialize(payload);
+                if (dto != null)
                 {
-                    Choice = safeFallback,
-                    Reason = fallbackReason
-                };
+                    // Prefer the stable option id: it survives any difference in option ordering.
+                    var byId = -1;
+                    if (!string.IsNullOrWhiteSpace(dto.id))
+                    {
+                        for (int oi = 0; oi < options.Count; oi++)
+                        {
+                            if (string.Equals(options[oi].OptionId, dto.id, StringComparison.Ordinal))
+                            {
+                                byId = oi;
+                                break;
+                            }
+                        }
+                    }
+                    var resolved = byId >= 0 ? byId : dto.index;
+                    decision = resolved >= 0
+                        ? new RestSiteDecisionResult
+                        {
+                            Choice = resolved,
+                            Reason = string.IsNullOrWhiteSpace(dto.reason) ? "跟随房主决策" : dto.reason,
+                            UpgradeIndices = dto.indices ?? new List<int>()
+                        }
+                        : new RestSiteDecisionResult { Choice = safeFallback, Reason = fallbackReason };
+                }
+                else
+                {
+                    decision = new RestSiteDecisionResult { Choice = safeFallback, Reason = fallbackReason };
+                }
+            }
+            else
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(5000); // 5s max for diagnostics
+                    decision = await manager.DecisionService.DecideRestSiteAsync(
+                        aiPlayer, currentHp, maxHp, options, cts.Token);
+                }
+                catch
+                {
+                    decision = new RestSiteDecisionResult
+                    {
+                        Choice = safeFallback,
+                        Reason = fallbackReason
+                    };
+                }
+
+                if (Compat.AiMultiplayer.RequiresDecisionSync)
+                {
+                    Compat.AiSyncBus.Publish(
+                        Compat.AiSyncBus.KindChoice,
+                        restKey,
+                        Compat.AiChoiceCodec.Serialize(decision.Choice, decision.UpgradeIndices, decision.Reason,
+                            options[Math.Clamp(decision.Choice, 0, options.Count - 1)].OptionId));
+                }
             }
 
             var applyPick = decision.Choice;

@@ -377,6 +377,24 @@ public class CombatDecisionExecutor
         }
 
         _log.Log("AI_ACTION", $"使用药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]{(target != null ? $" -> {target.Name}" : "")}");
+
+        // Multiplayer: the host owns the AI's potion action. A follower must not enqueue a second
+        // copy (that used to consume a potion twice, or even the human's potion before the action
+        // owner fix); it just waits for the host's action to replicate and consume the slot.
+        if (Compat.AiMultiplayer.IsFollower)
+        {
+            var before = aiPlayer.Potions?.Count() ?? 0;
+            _log.Log("AI_ACTION", "跟随房主使用药水，等待同步");
+            for (int i = 0; i < 30; i++)
+            {
+                await Task.Delay(100, ct);
+                var now = aiPlayer.Potions?.Count() ?? 0;
+                if (now < before)
+                    break;
+            }
+            return true;
+        }
+
         try
         {
             var usePotionAction = new UsePotionAction(potion, target, CombatManager.Instance.IsInProgress);
