@@ -75,6 +75,17 @@ public static class CharacterSelectScreenPatch
             MainFile.Logger.Warn($"[Nickname] 大厅昵称同步注册失败: {ex.Message}");
         }
 
+        // Same for the AI replication channel: the host may push the AI snapshot at the very first
+        // map-point sync, which can happen before the client has bound its AI player.
+        try
+        {
+            Compat.AiSyncBus.EnsureRegistered(lobby.NetService);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Sync] 大厅 AI 同步注册失败: {ex.Message}");
+        }
+
         var existing = __instance.GetNodeOrNull<Control>(AiContainerName);
         existing?.QueueFree();
 
