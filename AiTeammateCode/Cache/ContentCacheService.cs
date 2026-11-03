@@ -6,7 +6,9 @@ namespace AiTeammate.AiTeammateCode.Cache;
 
 public class ContentCacheService
 {
-    private const int CacheSchemaVersion = 3;
+    // v4: card costs use the upgrade-adjusted value (GetWithModifiers) instead of the printed
+    // Canonical cost, so upgradeCostText is finally correct; old caches must be regenerated.
+    private const int CacheSchemaVersion = 4;
     private const string IndexPath = "user://ai_teammate/cache/content_index.json";
     private const string FullPath = "user://ai_teammate/cache/content_full.json";
     private const string CacheDir = ModPaths.CacheDir;

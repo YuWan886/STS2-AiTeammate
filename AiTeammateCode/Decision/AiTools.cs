@@ -54,7 +54,7 @@ public sealed class AiToolRunner
     /// <summary>Tool manifest for combat decision prompts.</summary>
     public static string DescribeCombatTools(bool includeScreenshot = false) =>
         "- read_pile: args {\"pile\":\"hand|draw|discard|exhaust|deck\", \"detail\":\"brief|full\", \"player\":\"可选，队友名或角色名；省略=自己\"}；返回该玩家该牌堆的全部牌（brief=牌名/费用/类型，full=附带完整描述）。抽牌堆始终不给顺序。\n" +
-        "- card_info: args {\"name\":\"卡名\", \"player\":\"可选\"}；返回该卡牌的完整描述（含升级版信息）。\n" +
+        "- card_info: args {\"name\":\"卡名\", \"player\":\"可选\"}；返回该卡牌的完整描述（含升级状态；尚未升级的卡附带“升级后”效果）。\n" +
         "- read_relics: args {\"player\":\"可选\"}；返回该玩家全部遗物、层数/计数器与完整效果。\n" +
         "- read_potions: args {\"player\":\"可选\"}；返回该玩家全部药水与完整效果、槽位占用。\n" +
         "- read_player: args {\"player\":\"可选\"}；返回血量/格挡/能量/辉星/金币/状态/手牌/牌堆张数/药水与遗物数量。\n" +
@@ -72,7 +72,7 @@ public sealed class AiToolRunner
         "- read_potions: args {\"player\":\"可选\"}；返回全部药水与完整效果。\n" +
         "- read_pile: args {\"pile\":\"deck|hand\", \"detail\":\"brief|full\", \"player\":\"可选\"}；返回主牌组或手牌内容。\n" +
         "- deck_stats: args {\"player\":\"可选\"}；返回牌组统计（类型/稀有度/平均费用/升级数/关键词）。\n" +
-        "- card_info: args {\"name\":\"卡名\", \"player\":\"可选\"}；返回单卡完整描述。\n" +
+        "- card_info: args {\"name\":\"卡名\", \"player\":\"可选\"}；返回单卡完整描述；尚未升级的卡附带“升级后”效果。\n" +
         DescribeNicknameTool() + "\n" +
         (includeScreenshot ? DescribeScreenshotTool() : "");
 
@@ -265,22 +265,33 @@ public sealed class AiToolRunner
         {
             // Prefer the generated cache entry: it carries the upgraded description and keywords.
             var cacheId = card.CanonicalInstance.Id.Entry;
+            string line;
             if (_query.GetCardBrief(cacheId) != null)
-                return _query.LookupAndFormatCard(cacheId, card.IsUpgraded);
+            {
+                line = _query.LookupAndFormatCard(cacheId, card.IsUpgraded);
+            }
+            else
+            {
+                var desc = PromptTextHelper.CleanText(PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
+                var costStr = ContextBuilder.FormatCostCompact(card);
+                var upgraded = card.IsUpgraded ? "+" : "";
+                line = string.IsNullOrWhiteSpace(desc)
+                    ? $"{card.Title}{upgraded}({costStr}{ContextBuilder.CardTypeTag(card.Type)})"
+                    : $"{card.Title}{upgraded}({costStr}{ContextBuilder.CardTypeTag(card.Type)}): {desc}";
+            }
 
-            var desc = PromptTextHelper.CleanText(PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
-            var costStr = ContextBuilder.FormatCostCompact(card);
-            var upgraded = card.IsUpgraded ? "+" : "";
-            return string.IsNullOrWhiteSpace(desc)
-                ? $"{card.Title}{upgraded}({costStr}{ContextBuilder.CardTypeTag(card.Type)})"
-                : $"{card.Title}{upgraded}({costStr}{ContextBuilder.CardTypeTag(card.Type)}): {desc}";
+            // An upgradable card that is not upgraded yet: say what the upgrade actually gives.
+            var preview = _query.FormatUpgradePreview(card);
+            return string.IsNullOrWhiteSpace(preview) ? line : line + "\n" + preview;
         }
 
         // Not in any pile/deck: fall back to the content cache (modded cards included).
         var enrichment = _query.EnrichContext(name);
-        return string.IsNullOrWhiteSpace(enrichment)
+        var byName = _query.FormatUpgradePreviewByName(name);
+        var text = string.IsNullOrWhiteSpace(enrichment)
             ? $"未找到卡牌 \"{name}\"：不在手牌/牌堆/主牌组中，资料库也没有记录。"
             : enrichment.Trim();
+        return string.IsNullOrWhiteSpace(byName) ? text : text + "\n" + byName;
     }
 
     private static bool MatchesCard(CardModel card, string name)

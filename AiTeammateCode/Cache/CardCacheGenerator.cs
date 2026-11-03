@@ -22,7 +22,7 @@ public class CardCacheGenerator
                 entries[id] = new CardIndexEntry
                 {
                     Name = card.Title,
-                    Cost = card.EnergyCost.Canonical,
+                    Cost = PromptTextHelper.ResolveEnergyCost(card),
                     CostText = ContentCacheMetadata.FormatCardCost(card),
                     Type = card.Type.ToString(),
                     Rarity = card.Rarity.ToString(),
@@ -65,7 +65,7 @@ public class CardCacheGenerator
                 {
                     Name = card.Title,
                     UpgradedName = upgradedCard?.Title ?? "",
-                    Cost = card.EnergyCost.Canonical,
+                    Cost = PromptTextHelper.ResolveEnergyCost(card),
                     CostText = ContentCacheMetadata.FormatCardCost(card),
                     UpgradeCostText = upgradedCard != null ? ContentCacheMetadata.FormatCardCost(upgradedCard) : "",
                     Type = card.Type.ToString(),

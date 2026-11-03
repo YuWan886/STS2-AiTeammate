@@ -305,7 +305,7 @@ public class CombatDecisionExecutor
 
     private async Task PlayOneCard(Player aiPlayer, CombatState state, CardModel card, Creature? target)
     {
-        var cost = card.EnergyCost?.Canonical ?? 0;
+        var cost = PromptTextHelper.ResolveEnergyCost(card);
         var starCost = Math.Max(0, card.GetStarCostWithModifiers());
         var preEnergy = aiPlayer.PlayerCombatState?.Energy ?? 0;
         var preStars = aiPlayer.PlayerCombatState?.Stars ?? 0;
@@ -426,7 +426,7 @@ public class CombatDecisionExecutor
             CardModel? bestCard = null;
             Creature? bestTarget = null;
 
-            var attacks = playable.Where(c => c.Type == CardType.Attack).OrderByDescending(c => c.EnergyCost?.Canonical ?? 0).ToList();
+            var attacks = playable.Where(c => c.Type == CardType.Attack).OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c)).ToList();
             if (attacks.Count > 0)
             {
                 bestCard = attacks[0];
@@ -439,14 +439,14 @@ public class CombatDecisionExecutor
             }
             else if (enemyAttacking)
             {
-                var skills = playable.Where(c => c.Type == CardType.Skill).OrderByDescending(c => c.EnergyCost?.Canonical ?? 0).ToList();
+                var skills = playable.Where(c => c.Type == CardType.Skill).OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c)).ToList();
                 if (skills.Count > 0) bestCard = skills[0];
             }
             else
             {
-                var powers = playable.Where(c => c.Type == CardType.Power).OrderByDescending(c => c.EnergyCost?.Canonical ?? 0).ToList();
+                var powers = playable.Where(c => c.Type == CardType.Power).OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c)).ToList();
                 if (powers.Count > 0) bestCard = powers[0];
-                else bestCard = playable.OrderByDescending(c => c.EnergyCost?.Canonical ?? 0).FirstOrDefault();
+                else bestCard = playable.OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c)).FirstOrDefault();
             }
 
             if (bestCard == null) break;

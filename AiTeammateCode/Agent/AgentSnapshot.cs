@@ -533,7 +533,7 @@ internal static class AgentSnapshotBuilder
                 ["index"] = handIndex,
                 ["name"] = name,
                 ["id"] = card.Id.Entry,
-                ["cost"] = card.EnergyCost?.Canonical ?? 0,
+                ["cost"] = PromptTextHelper.ResolveEnergyCost(card),
                 ["star_cost"] = Math.Max(0, card.GetStarCostWithModifiers()),
                 ["type"] = card.Type.ToString(),
                 ["upgraded"] = card.IsUpgraded,
@@ -685,7 +685,7 @@ internal static class AgentSnapshotBuilder
                 ["index"] = i,
                 ["kind"] = "card_reward",
                 ["label"] = $"{card.Title ?? card.Id.Entry}{FormatCost(card)}",
-                ["detail"] = SafeCardDescription(card)
+                ["detail"] = SafeCardDescriptionWithUpgrade(card)
             });
         }
 
@@ -726,7 +726,7 @@ internal static class AgentSnapshotBuilder
                 ["index"] = i,
                 ["kind"] = "card_select",
                 ["label"] = $"{card.Title ?? card.Id.Entry}{FormatCost(card)}",
-                ["detail"] = SafeCardDescription(card)
+                ["detail"] = SafeCardDescriptionWithUpgrade(card)
             });
         }
 
@@ -756,7 +756,7 @@ internal static class AgentSnapshotBuilder
                 ["index"] = i,
                 ["kind"] = "card_choice",
                 ["label"] = $"{card.Title ?? card.Id.Entry}{FormatCost(card)}",
-                ["detail"] = SafeCardDescription(card)
+                ["detail"] = SafeCardDescriptionWithUpgrade(card)
             });
         }
 
@@ -1700,9 +1700,26 @@ internal static class AgentSnapshotBuilder
     internal static string SafeCardDescription(CardModel card) =>
         PromptTextHelper.CleanText(PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
 
+    /// <summary>
+    /// Card text plus, for a card that can still be upgraded, what the upgrade would give.
+    /// 卡面描述 + 升级预览（升级后效果），给 card_reward / card_select / card_choice 选项用。
+    /// </summary>
+    internal static string SafeCardDescriptionWithUpgrade(CardModel card)
+    {
+        var desc = SafeCardDescription(card);
+        try
+        {
+            var preview = AiTeammateManager.Instance?.QueryService?.FormatUpgradePreview(card, 80);
+            if (!string.IsNullOrWhiteSpace(preview))
+                return string.IsNullOrWhiteSpace(desc) ? preview : $"{desc} | {preview}";
+        }
+        catch { }
+        return desc;
+    }
+
     internal static string FormatCost(CardModel card)
     {
-        var cost = card.EnergyCost?.Canonical ?? 0;
+        var cost = PromptTextHelper.ResolveEnergyCost(card);
         var star = Math.Max(0, card.GetStarCostWithModifiers());
         return star > 0 ? $"({cost}费/{star}星)" : $"({cost}费)";
     }

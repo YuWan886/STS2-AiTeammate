@@ -221,9 +221,7 @@ public class ContextBuilder
     private static string FormatCardDetail(CardModel card)
     {
         var name = card.Title ?? card.Id.Entry;
-        var cost = card.EnergyCost?.Canonical ?? 0;
-        var starCost = Math.Max(0, card.GetStarCostWithModifiers());
-        var costStr = starCost > 0 ? $"{cost}费{starCost}星" : $"{cost}费";
+        var costStr = FormatCostCompact(card);
 
         // 目标类型
         var targetStr = card.TargetType.ToString();
@@ -454,10 +452,9 @@ public class ContextBuilder
     private string FormatCardBrief(CardModel card)
     {
         var name = card.Title ?? card.Id.Entry;
-        var cost = card.EnergyCost?.Canonical ?? 0;
         var oneLiner = GetCardOneLiner(card, 80);
 
-        return $"{name}({cost}费) {oneLiner}";
+        return $"{name}({FormatCostCompact(card)}) {oneLiner}";
     }
 
     private static string GetCharacterName(Player player)
@@ -495,9 +492,7 @@ public class ContextBuilder
         return string.Join(", ", handCards.Select(card =>
         {
             var name = card.Title ?? card.Id.Entry;
-            var cost = card.EnergyCost?.Canonical ?? 0;
-            var starCost = Math.Max(0, card.GetStarCostWithModifiers());
-            var costStr = starCost > 0 ? $"{cost}费{starCost}星" : $"{cost}费";
+            var costStr = FormatCostCompact(card);
             var typeTag = card.Type switch { CardType.Attack => "攻", CardType.Skill => "技", CardType.Power => "能", _ => "" };
             var hint = GetCardEffectHint(card);
             return $"[{name}({costStr}){typeTag}{hint}]";
@@ -909,7 +904,7 @@ public class ContextBuilder
                 PromptTextHelper.ResolveCardDescription(card, PileType.Hand, card.Id.Entry)))
             .ToList();
 
-        var averageCost = deck.Average(card => (double)(card.EnergyCost?.Canonical ?? 0));
+        var averageCost = deck.Average(card => (double)PromptTextHelper.ResolveEnergyCost(card));
         var upgraded = deck.Count(card => card.IsUpgraded);
 
         var types = deck
@@ -1053,7 +1048,7 @@ public class ContextBuilder
             .GroupBy(c => (c.Id.Entry, c.IsUpgraded, c.Title))
             .Select(g => (Card: g.First(), Count: g.Count()))
             .OrderBy(g => (int)g.Card.Type)
-            .ThenBy(g => g.Card.EnergyCost?.Canonical ?? 0)
+            .ThenBy(g => PromptTextHelper.ResolveEnergyCost(g.Card))
             .ThenBy(g => g.Card.Title ?? g.Card.Id.Entry, StringComparer.Ordinal)
             .ToList();
 
@@ -1091,7 +1086,9 @@ public class ContextBuilder
     public static string FormatCostCompact(CardModel card)
     {
         var energyCost = card.EnergyCost;
-        var costStr = energyCost is { CostsX: true } ? "X费" : $"{energyCost?.Canonical ?? 0}费";
+        var costStr = energyCost is { CostsX: true }
+            ? "X费"
+            : $"{PromptTextHelper.ResolveEnergyCost(card)}费";
         if (card.HasStarCostX)
             return costStr + "X星";
 
@@ -1217,7 +1214,9 @@ public class ContextBuilder
         {
             var card = choices[i];
             if (card == null) continue;
-            sb.AppendLine($"{i}. {FormatCardDetail(card)}");
+            var detail = FormatCardDetail(card);
+            var preview = _query.FormatUpgradePreview(card, 90);
+            sb.AppendLine(string.IsNullOrWhiteSpace(preview) ? $"{i}. {detail}" : $"{i}. {detail} | {preview}");
         }
         sb.AppendLine("-1=跳过");
 
@@ -1348,9 +1347,10 @@ public class ContextBuilder
             for (int i = 0; i < upgradableCards.Count; i++)
             {
                 var card = upgradableCards[i];
-                var cost = card.EnergyCost?.Canonical ?? 0;
                 var brief = GetCardOneLiner(card, 60);
-                sb.AppendLine($"- {i}. {card.Title}({cost}费) {brief}");
+                var preview = _query.FormatUpgradePreview(card, 90);
+                var line = $"- {i}. {card.Title}({FormatCostCompact(card)}) 当前: {brief}";
+                sb.AppendLine(string.IsNullOrWhiteSpace(preview) ? line : $"{line} | {preview}");
             }
         }
 
@@ -1579,7 +1579,7 @@ public class ContextBuilder
 
         if (deck.Count > 0)
         {
-            var avgCost = deck.Average(card => card.EnergyCost?.Canonical ?? 0);
+            var avgCost = deck.Average(card => (double)PromptTextHelper.ResolveEnergyCost(card));
             sb.AppendLine($"资源概况: 牌组{deck.Count}张 | 金币{aiPlayer.Gold} | 平均费用{avgCost:F1}");
         }
 

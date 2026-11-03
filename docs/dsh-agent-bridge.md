@@ -38,12 +38,13 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 - `controlled.kind=ai` 时 **Phase 3 关闭**（`CombatDecisionExecutor` 判 `AgentDecisionBroker.Enabled`）。每执行完一次决策，只要仍有能量/辉星且手牌里有能打出的牌，`ProcessCombatTurnAsync` 会**再挂一次决策**，prompt 里就是抽完牌之后的新手牌与新牌堆；单回合最多 6 次决策（内置后端仍是 3 次）。
 - 计划里显式返回 `{"type":"end_turn"}` 时立即停止追加决策（内置后端也尊重该动作，只是它的 Phase 3 已经先出完剩余牌）。
 - `ai_decision` / `ai_busy` 两种快照都带上了 `combat` 段（实时手牌、能量/辉星、敌人、牌堆张数）。执行期间（`ai_busy`）也可以用 `sts2_state` 直接看到抽到的牌；`options` 在 AI 模式下仍为空——出牌要用 `sts2_decide`，不用索引。
+- `combat.hand[].cost` 是**当前实际费用**（升级降费、临时费用修正都算进去，如「全身撞击+」= 0）；`upgraded` 表示是否已经升级。`card_reward` / `card_select` / `card_choice` 的 `detail` 末尾会跟一句「升级后: …」，未升级的卡可以直接比较升级收益。
 - 决策内容里返回 `tool_calls`（`read_pile` / `card_info` …）同样有效：游戏在主线程执行完只读工具，把结果拼进新 prompt 后**再挂一次决策**，不会像以前那样掉进启发式兜底。图片类工具（`screenshot`）没有图像回传通道，`sts2_screenshot` 请当作独立工具调用。
 - 内置 LLM 后端行为不变：仍是每回合最多 3 次决策，Phase 3 照常补牌。
 
 ### 1.3 手牌选择、运行控制与人格（v2.2）
 
-- dsh 接管本地玩家时，`CardSelectCmd.FromHand` / `FromHandForUpgrade` 不再打开原版手牌选择 UI（`NPlayerHand.SelectCards` 会一直等真人点击，dsh 无法完成；期间 `play_card` / `end_turn` 还会抢着执行，造成软锁与 ERROR 刷屏）。现在改为在 `AgentDecisionBroker` 挂一个 `kind=hand_select` 决策：`options=[{index, card, upgradable}]`，dsh 用 `sts2_decide {"indices":[...], "reason":"..."}` 回答，模组照原有写法 `SyncLocalChoice` 交回；超时/未回答则启发式兜底，绝不把空选择交给游戏。
+- dsh 接管本地玩家时，`CardSelectCmd.FromHand` / `FromHandForUpgrade` 不再打开原版手牌选择 UI（`NPlayerHand.SelectCards` 会一直等真人点击，dsh 无法完成；期间 `play_card` / `end_turn` 还会抢着执行，造成软锁与 ERROR 刷屏）。现在改为在 `AgentDecisionBroker` 挂一个 `kind=hand_select` 决策：`options=[{index, card, upgradable, detail}]`（prompt 里每张牌带费用、当前效果和「升级后」效果，`detail` 与之一致），dsh 用 `sts2_decide {"indices":[...], "reason":"..."}` 回答，模组照原有写法 `SyncLocalChoice` 交回；超时/未回答则启发式兜底，绝不把空选择交给游戏。
 - `sts2_play_card` / `sts2_end_turn` 在 `NPlayerHand.IsInCardSelection` 为真时直接拒绝并提示先回答选牌决策。
 - 选目标：休息处 MEND（以及少数需要点选目标的药水/遗物）会打开原版 `NTargetManager` 的选目标模式并禁用底层按钮；桥接把这一状态识别为 `phase=target_select`，`options` 是可点的角色/生物（遵守 `NTargetManager` 自己的过滤，例如 MEND 不能选自己），最后一个索引是取消。`sts2_choose index=<n>` 会先 hover 该节点再完成选择，等价于鼠标点击；点取消则让原动作返回失败、休息处重新启用选项。
 - 运行控制工具：`sts2_pause` / `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon`。暂停菜单（capstone submenu）不在 overlay 栈里，快照单独识别为 `phase=paused`、不可行动。

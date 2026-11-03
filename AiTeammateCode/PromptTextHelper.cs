@@ -72,6 +72,36 @@ internal static class PromptTextHelper
         return OnMainThread(() => card.GetDescriptionForPile(pile) ?? "", "");
     }
 
+    /// <summary>
+    /// Current (upgrade-adjusted) energy cost. <see cref="CardEnergyCost.Canonical"/> is the cost
+    /// printed on the card and does NOT change when an upgrade lowers it (Body Slam 1→0, Apotheosis
+    /// 2→1, ...), so it must never be used to decide whether a card is playable or to tell the model
+    /// what the card costs right now.
+    /// </summary>
+    public static int ResolveEnergyCost(CardModel? card)
+    {
+        if (card == null) return 0;
+
+        try { return Math.Max(0, card.EnergyCost.GetWithModifiers(CostModifiers.All)); }
+        catch { return Math.Max(0, card.EnergyCost?.Canonical ?? 0); }
+    }
+
+    /// <summary>
+    /// "What this card becomes after upgrading", straight from the game (the upgraded branch of the
+    /// description with BBCode stripped). Empty when the card cannot be upgraded, already is, or the
+    /// description carries unresolved placeholders.
+    /// </summary>
+    public static string ResolveUpgradePreview(CardModel? card, string fallback = "")
+    {
+        if (card == null || card.IsUpgraded || !card.IsUpgradable) return fallback;
+
+        return OnMainThread(() =>
+        {
+            try { return CleanText(card.GetDescriptionForUpgradePreview()); }
+            catch { return ""; }
+        }, fallback);
+    }
+
     private static string OnMainThread(Func<string> getter, string fallback)
     {
         try

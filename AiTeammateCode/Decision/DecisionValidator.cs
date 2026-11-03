@@ -111,7 +111,7 @@ public class DecisionValidator
         // All playable cards (not unplayable, affordable by both energy and stars)
         var playable = combat.Hand.Cards
             .Where(c => !c.Keywords.Contains(CardKeyword.Unplayable)
-                     && (c.EnergyCost?.Canonical ?? 0) <= energy
+                     && (PromptTextHelper.ResolveEnergyCost(c)) <= energy
                      && Math.Max(0, c.GetStarCostWithModifiers()) <= stars)
             .ToList();
 
@@ -131,12 +131,12 @@ public class DecisionValidator
         // Priority: Attacks first (especially against low-HP enemies)
         var attacks = playable
             .Where(c => c.Type == CardType.Attack)
-            .OrderByDescending(c => c.EnergyCost?.Canonical ?? 0)
+            .OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c))
             .ToList();
 
         foreach (var card in attacks)
         {
-            var cost = card.EnergyCost?.Canonical ?? 0;
+            var cost = PromptTextHelper.ResolveEnergyCost(card);
             var starCost = Math.Max(0, card.GetStarCostWithModifiers());
             if (cost > energy || starCost > stars) continue;
 
@@ -170,12 +170,12 @@ public class DecisionValidator
         {
             var skills = playable
                 .Where(c => c.Type == CardType.Skill)
-                .OrderByDescending(c => c.EnergyCost?.Canonical ?? 0)
+                .OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c))
                 .ToList();
 
             foreach (var card in skills)
             {
-                var cost = card.EnergyCost?.Canonical ?? 0;
+                var cost = PromptTextHelper.ResolveEnergyCost(card);
                 var starCost = Math.Max(0, card.GetStarCostWithModifiers());
                 if (cost > energy || starCost > stars) continue;
                 if (card.Keywords.Contains(CardKeyword.Unplayable)) continue;
@@ -196,12 +196,12 @@ public class DecisionValidator
         {
             var powers = playable
                 .Where(c => c.Type == CardType.Power)
-                .OrderByDescending(c => c.EnergyCost?.Canonical ?? 0)
+                .OrderByDescending(c => PromptTextHelper.ResolveEnergyCost(c))
                 .ToList();
 
             foreach (var card in powers)
             {
-                var cost = card.EnergyCost?.Canonical ?? 0;
+                var cost = PromptTextHelper.ResolveEnergyCost(card);
                 var starCost = Math.Max(0, card.GetStarCostWithModifiers());
                 if (cost > energy || starCost > stars) continue;
 

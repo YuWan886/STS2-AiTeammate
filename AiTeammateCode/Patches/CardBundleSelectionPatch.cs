@@ -266,7 +266,7 @@ internal static class CardBundleSelectionPatch
 
     private static string DescribeCost(CardModel card)
     {
-        try { return card.EnergyCost.CostsX ? "X" : card.EnergyCost.Canonical.ToString(); }
+        try { return card.EnergyCost.CostsX ? "X" : PromptTextHelper.ResolveEnergyCost(card).ToString(); }
         catch { return "?"; }
     }
 

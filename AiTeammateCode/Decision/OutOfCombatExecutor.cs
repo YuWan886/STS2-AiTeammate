@@ -1,4 +1,4 @@
-﻿using Godot;
+using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.AutoSlay;
 using MegaCrit.Sts2.Core.AutoSlay.Helpers;
@@ -159,7 +159,7 @@ public class OutOfCombatExecutor
             {
                 if (card != null)
                 {
-                    var energyCost = card.EnergyCost?.Canonical ?? 0;
+                    var energyCost = PromptTextHelper.ResolveEnergyCost(card);
                     var starCost = Math.Max(0, card.GetStarCostWithModifiers());
                     costInfo = starCost > 0 ? $"({energyCost}费/{starCost}辉星)" : $"({energyCost}费)";
                 }

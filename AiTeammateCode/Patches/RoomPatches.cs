@@ -1413,15 +1413,31 @@ internal static class DshHandSelect
         if (!string.IsNullOrWhiteSpace(header))
             prompt.AppendLine(header!);
         prompt.AppendLine($"需要从下面的手牌中选择 {pickCount} 张（只能选这个列表里的牌）：");
+        var query = AiTeammateManager.Instance?.QueryService;
         for (var i = 0; i < cards.Count; i++)
         {
             var card = cards[i];
-            prompt.AppendLine($"{i}: {card.Title ?? card.Id.Entry}");
+            var current = PromptTextHelper.CleanText(
+                PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
+            // In-combat upgrade picks (Armaments, ...) are only worth making with the upgrade payoff
+            // in view, so the prompt carries "current → upgraded" like the rest-site SMITH list.
+            var preview = query?.FormatUpgradePreview(card, 80) ?? "";
+
+            var line = $"{i}: {card.Title ?? card.Id.Entry} ({ContextBuilder.FormatCostCompact(card)})";
+            if (!string.IsNullOrWhiteSpace(current))
+                line += $" 当前: {PromptTextHelper.Truncate(current, 60)}";
+            if (!string.IsNullOrWhiteSpace(preview))
+                line += $" | {preview}";
+            prompt.AppendLine(line);
+
             options.Add(new JsonObject
             {
                 ["index"] = i,
                 ["card"] = card.Title ?? card.Id.Entry,
-                ["upgradable"] = card.IsUpgradable
+                ["upgradable"] = card.IsUpgradable,
+                ["detail"] = string.IsNullOrWhiteSpace(preview)
+                    ? PromptTextHelper.Truncate(current, 80)
+                    : $"{PromptTextHelper.Truncate(current, 60)} | {preview}".Trim(' ', '|')
             });
         }
         prompt.AppendLine("请以 JSON 返回：{\"indices\":[...], \"reason\":\"理由\"}");
