@@ -568,6 +568,9 @@ internal static class AgentSnapshotBuilder
                 ["hp"] = enemy.CurrentHp,
                 ["max_hp"] = enemy.MaxHp,
                 ["block"] = enemy.Block,
+                // Same shape as combat.player.powers: dsh needs the enemy's buffs/debuffs to judge
+                // whether an attack lands and how much it gets amplified. 敌方的状态与层数。
+                ["powers"] = PowersJson(enemy.Powers),
                 ["alive"] = enemy.IsAlive,
                 ["intent"] = SafeIntent(enemy)
             });

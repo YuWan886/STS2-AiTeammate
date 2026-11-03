@@ -39,6 +39,7 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 - 计划里显式返回 `{"type":"end_turn"}` 时立即停止追加决策（内置后端也尊重该动作，只是它的 Phase 3 已经先出完剩余牌）。
 - `ai_decision` / `ai_busy` 两种快照都带上了 `combat` 段（实时手牌、能量/辉星、敌人、牌堆张数）。执行期间（`ai_busy`）也可以用 `sts2_state` 直接看到抽到的牌；`options` 在 AI 模式下仍为空——出牌要用 `sts2_decide`，不用索引。
 - `combat.hand[].cost` 是**当前实际费用**（升级降费、临时费用修正都算进去，如「全身撞击+」= 0）；`upgraded` 表示是否已经升级。`card_reward` / `card_select` / `card_choice` 的 `detail` 末尾会跟一句「升级后: …」，未升级的卡可以直接比较升级收益。
+- `combat.enemies[]` 带 `hp / max_hp / block / powers / alive / intent`：`block` 是护甲，`powers` 与 `player.powers` 同构（`name / id / amount`，含负面层数），`intent` 是当回合意图；已死敌人也留在列表里（`alive:false`），方便判断复活/召唤。
 - 决策内容里返回 `tool_calls`（`read_pile` / `card_info` …）同样有效：游戏在主线程执行完只读工具，把结果拼进新 prompt 后**再挂一次决策**，不会像以前那样掉进启发式兜底。图片类工具（`screenshot`）没有图像回传通道，`sts2_screenshot` 请当作独立工具调用。
 - 内置 LLM 后端行为不变：仍是每回合最多 3 次决策，Phase 3 照常补牌。
 
@@ -184,7 +185,8 @@ TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
     ],
     "enemies": [
       { "index": 0, "name": "Jaw Worm", "id": "JawWorm", "hp": 40, "max_hp": 44,
-        "block": 0, "alive": true, "intent": "伤害11" }
+        "block": 5, "powers": [{"name":"力量","id":"Strength","amount":3}],
+        "alive": true, "intent": "伤害11" }
     ],
     "piles": { "draw": 12, "discard": 3, "exhaust": 0, "play": 0 }
   },

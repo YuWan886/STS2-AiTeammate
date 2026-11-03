@@ -472,16 +472,43 @@ public class ContextBuilder
         foreach (var enemy in state.Enemies.Where(e => e.IsAlive))
         {
             var intent = enemy.Monster?.NextMove != null ? FormatIntentCompact(enemy.Monster.NextMove) : "?";
-            var vuln = HasVulnerable(enemy) ? "[易伤]" : "";
-            var weak = HasWeakened(enemy) ? "[虚弱]" : "";
-            var buffs = string.Join("", enemy.Powers?
-                .Where(p => p.Amount > 0
-                    && !p.Id.Entry.Equals("Vulnerable", StringComparison.OrdinalIgnoreCase)
-                    && !p.Id.Entry.Equals("Weak", StringComparison.OrdinalIgnoreCase))
-                .Select(p => $"[{FormatPowerBrief(p)}]") ?? Enumerable.Empty<string>());
-            enemyInfos.Add($"{enemy.Name}({enemy.CurrentHp}/{enemy.MaxHp}) {intent}{vuln}{weak}{buffs}");
+            // Armor decides whether an attack actually lands, so it belongs next to the HP.
+            // 敌人的护甲和状态都要给，不能只给玩家。
+            var powers = FormatEnemyPowers(enemy);
+            enemyInfos.Add($"{enemy.Name}({enemy.CurrentHp}/{enemy.MaxHp} 格挡{enemy.Block}) {intent}{powers}");
         }
         return enemyInfos.Count > 0 ? string.Join(" | ", enemyInfos) : "无存活敌人";
+    }
+
+    /// <summary>
+    /// Enemy buffs/debuffs with stacks. Vulnerable/Weak get their short Chinese tag, everything else
+    /// reuses <see cref="FormatPowerBrief"/>; negative stacks count too (a Strength-down, ...).
+    /// 敌人身上的状态与层数。
+    /// </summary>
+    private static string FormatEnemyPowers(Creature enemy)
+    {
+        if (enemy.Powers == null || enemy.Powers.Count == 0) return "";
+
+        var parts = new List<string>();
+        foreach (var power in enemy.Powers)
+        {
+            if (power.Amount == 0) continue;
+
+            var id = power.Id.Entry;
+            // Power ids are the class name uppercased ("VulnerablePower" -> "VULNERABLE_POWER"),
+            // so strip the suffix before matching the two common debuffs.
+            var key = id.EndsWith("_POWER", StringComparison.OrdinalIgnoreCase)
+                ? id[..^"_POWER".Length]
+                : id;
+            if (key.Equals("Vulnerable", StringComparison.OrdinalIgnoreCase))
+                parts.Add($"[易伤×{power.Amount}]");
+            else if (key.Equals("Weak", StringComparison.OrdinalIgnoreCase))
+                parts.Add($"[虚弱×{power.Amount}]");
+            else
+                parts.Add($"[{FormatPowerBrief(power)}]");
+        }
+
+        return parts.Count > 0 ? " " + string.Join("", parts) : "";
     }
 
     private string BuildHandSummary(List<CardModel> handCards)
@@ -1110,16 +1137,6 @@ public class ContextBuilder
         return string.IsNullOrWhiteSpace(desc)
             ? $"{name}{countStr}({costStr}{typeTag})"
             : $"{name}{countStr}({costStr}{typeTag}): {desc}";
-    }
-
-    private bool HasVulnerable(Creature creature)
-    {
-        return creature.Powers?.Any(p => p.Id.Entry.Equals("Vulnerable", System.StringComparison.OrdinalIgnoreCase)) ?? false;
-    }
-
-    private bool HasWeakened(Creature creature)
-    {
-        return creature.Powers?.Any(p => p.Id.Entry.Equals("Weak", System.StringComparison.OrdinalIgnoreCase)) ?? false;
     }
 
     /// <summary>Show which enemies are targeting which players, and whether the AI is in danger.</summary>
