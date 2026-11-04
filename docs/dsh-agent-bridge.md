@@ -30,6 +30,7 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 - 失败与超时：单次决策的等待预算是 `AgentFallbackSeconds × 3`（至少 60 秒，最多 300 秒），这样模型思考得久一点不会被误判；客户端断开（客户端数降到 0）会立刻 `Abort`，等待方返回空内容，走 mod 原有的兜底路径；战斗回合的 45 秒硬安全网在有外部大脑时放宽到 `330 + 90×(单回合决策次数-1)` 秒。
 - 连着 ≠ 在驱动：桥接插着但 dsh 一直没请求（比如 dsh 没在 autoplay、也没人让它干活）时，`AgentDecisionBroker` 不再挂起决策，直接走自带后端。判定依据是 `AgentBridgeService.ClientIdleSeconds`（每次 dsh 请求刷新，正在跑的 `sts2_wait` 也算活着）；静默超过 `AgentFallbackSeconds` 就整段跳过桥接，所以“连着但不干活”不会再让 AI/整局卡 5 分钟。dsh 一旦恢复调用（哪怕是 `sts2_state`），下一次决策又会回到 dsh 手里。
 - 动作归属：`controlled.kind=ai` 时 `sts2_play_card` 等 UI 动作会被拒绝（避免与内置执行器抢同一玩家），只能用 `sts2_decide`。
+- **v2.4 信息与执行**：外部大脑模式下的战斗 prompt 会带己方遗物与计数、敌人意图的多段伤害/更细状态；快照在 `ai_decision` 时带 `last_decision{id,kind,requested,dropped,valid}`（上一条决策哪些动作被校验丢弃及原因）；`combat` 执行按 dsh 返回的 actions 原序进行（药水仍最先），`deferred_actions` 仍走协同等待；快照 token 不再包含 `decision.age_seconds`，避免等待期间每 0.1 秒抖动。
 
 ### 1.2 战斗中的抽牌（v2.1）
 
@@ -338,9 +339,10 @@ export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
 | 工具 | 参数 | 说明 |
 |---|---|---|
 | `sts2_status` | `{}` | 连接自检：`sts2_hello` + 一次快照，返回 CONNECTED / NOT CONNECTED 与排查清单 |
-| `sts2_state` | `{}` | 完整快照 |
-| `sts2_wait` | `{after_token?, timeout_seconds?}` | 长轮询到可行动或状态变化；默认 25s，最大 50s |
+| `sts2_state` | `{detail?}` | 完整快照；`detail=delta` 只返回与上次快照相比变化的顶层字段（`changed` / `delta`） |
+| `sts2_wait` | `{after_token?, timeout_seconds?, detail?}` | 长轮询到可行动或状态变化；默认 25s，最大 50s；`detail=delta` 支持增量返回 |
 | `sts2_read` | `{subject, pile?, card?, player?, detail?}` | 深读（复用 `AiToolRunner`） |
+| `sts2_note` | `{text}` | **v2.4**：记录本局长期笔记（构筑方向、Boss 对策、想买的遗物等），按运行种子保存到 `user://ai_teammate/agent/agent_notes.json`，后续决策提示词注入 `[AI 笔记]`、快照带 `ai_notes`；换局自动清空 |
 | `sts2_set_nickname` | `{name}` | 修改 AI 队友显示昵称（≤24 字；空字符串恢复人格名）；名牌、聊天、提示词与联机客户端同步，只读模式也可用 |
 | `sts2_screenshot` | `{}` | 截图，原生 image content |
 | `sts2_decide` | `{decision}` | **v2**：回答 `phase=ai_decision` 里的挂起决策；内容是 prompt 要求的 JSON（对象或字符串均可） |

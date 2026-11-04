@@ -42,9 +42,12 @@ internal static class AgentToolExecutor
                     // Invitation poll: a plugin may claim the run and create a dsh session for it.
                     return AgentToolResult.Ok(AgentTakeoverInvite.TryTakeoverJson());
                 case "sts2_state":
-                    return CaptureState();
+                    return CaptureState(args);
                 case "sts2_wait":
                     return await WaitAsync(args, ct);
+                case "sts2_note":
+                    // Run notes are not game actions; they stay available in read-only mode too.
+                    return AddNote(args);
                 case "sts2_play_cards":
                     if (!allowActions)
                         return AgentToolResult.Error("Action tools are disabled in the mod settings.");
@@ -89,7 +92,7 @@ internal static class AgentToolExecutor
         var json = new JsonObject
         {
             ["name"] = "sts2-agent-bridge",
-            ["bridge_version"] = "2.2.1",
+            ["bridge_version"] = "2.4.0",
             ["allow_actions"] = AgentBridgeService.AllowActions,
             ["agent_driving"] = AgentDecisionBroker.Enabled,
             ["chat"] = true,
@@ -109,6 +112,8 @@ internal static class AgentToolExecutor
                 + "presses them and sts2_proceed goes back. "
                 + "Run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon. "
                 + "sts2_set_nickname changes the AI teammate's display name at any time. "
+                + "Record a long-run plan with sts2_note {text} — the mod shows it back in later "
+                + "decision prompts and snapshots. "
                 + "chat.pending in a snapshot lists player chat lines waiting for an answer; reply with "
                 + "sts2_chat_send {text, reply_to: <pending seq>} (a reply_to that is not a live pending "
                 + "seq is refused with the seqs that are), and use its directives field to record "
@@ -117,10 +122,95 @@ internal static class AgentToolExecutor
         return AgentToolResult.Ok(json.ToJsonString(AgentJson.Options));
     }
 
-    private static AgentToolResult CaptureState()
+    private static AgentToolResult CaptureState(JsonObject args)
     {
         var snapshot = MainThread.Invoke(() => AgentSnapshotBuilder.Capture());
+        if (IsDelta(args))
+        {
+            var delta = BuildDelta(snapshot);
+            RememberSnapshot(snapshot);
+            if (delta != null)
+            {
+                AddEnvelope(delta, snapshot, timedOut: false);
+                return AgentToolResult.Ok(delta.ToJsonString(AgentJson.Options));
+            }
+        }
+
+        RememberSnapshot(snapshot);
         return AgentToolResult.Ok(snapshot.Text);
+    }
+
+    private static AgentToolResult AddNote(JsonObject args)
+    {
+        var (ok, message) = AgentNotes.Add(StringArg(args, "text") ?? StringArg(args, "note"));
+        return ok ? AgentToolResult.Ok(message) : AgentToolResult.Error(message);
+    }
+
+    private static bool IsDelta(JsonObject args)
+        => string.Equals(StringArg(args, "detail"), "delta", StringComparison.OrdinalIgnoreCase);
+
+    // ---- Snapshot cache for detail=delta -----------------------------------
+
+    private static readonly Lock SnapshotSync = new();
+    private static JsonObject? _lastSnapshotJson;
+
+    private static void RememberSnapshot(AgentSnapshot snapshot)
+    {
+        try
+        {
+            lock (SnapshotSync)
+                _lastSnapshotJson = (JsonObject)snapshot.Json.DeepClone();
+        }
+        catch { /* delta is an optimization; never break the call */ }
+    }
+
+    /// <summary>Top-level fields that changed since the last snapshot this process returned.</summary>
+    private static JsonObject? BuildDelta(AgentSnapshot snapshot)
+    {
+        JsonObject? previous;
+        lock (SnapshotSync)
+            previous = _lastSnapshotJson;
+        if (previous == null)
+            return null; // first call: fall back to a full snapshot
+
+        var changed = new JsonArray();
+        var delta = new JsonObject();
+        foreach (var pair in snapshot.Json)
+        {
+            if (pair.Key == "token")
+                continue;
+            if (!previous.TryGetPropertyValue(pair.Key, out var oldValue)
+                || !JsonNode.DeepEquals(oldValue, pair.Value))
+            {
+                changed.Add(pair.Key);
+                delta[pair.Key] = pair.Value?.DeepClone();
+            }
+        }
+
+        foreach (var pair in previous)
+        {
+            if (!snapshot.Json.ContainsKey(pair.Key))
+            {
+                changed.Add(pair.Key);
+                delta[pair.Key] = null;
+            }
+        }
+
+        return new JsonObject
+        {
+            ["changed"] = changed,
+            ["delta"] = delta
+        };
+    }
+
+    private static void AddEnvelope(JsonObject delta, AgentSnapshot snapshot, bool timedOut)
+    {
+        delta["token"] = snapshot.Token;
+        delta["phase"] = snapshot.Phase;
+        delta["actionable"] = snapshot.Actionable;
+        delta["blocked_by"] = snapshot.BlockedBy;
+        if (timedOut)
+            delta["wait_timed_out"] = true;
     }
 
     private static async Task<AgentToolResult> WaitAsync(JsonObject args, CancellationToken ct)
@@ -131,9 +221,24 @@ internal static class AgentToolExecutor
         if (snapshot == null)
             return AgentToolResult.Ok("{\"wait_timed_out\":true}");
 
+        var timedOut = !snapshot.Actionable
+                       || (!string.IsNullOrEmpty(afterToken) && snapshot.Token == afterToken);
+
+        if (IsDelta(args))
+        {
+            var delta = BuildDelta(snapshot);
+            RememberSnapshot(snapshot);
+            if (delta != null)
+            {
+                AddEnvelope(delta, snapshot, timedOut);
+                return AgentToolResult.Ok(delta.ToJsonString(AgentJson.Options));
+            }
+        }
+
         var json = (JsonObject)snapshot.Json.DeepClone();
-        if (!snapshot.Actionable || (!string.IsNullOrEmpty(afterToken) && snapshot.Token == afterToken))
+        if (timedOut)
             json["wait_timed_out"] = true;
+        RememberSnapshot(snapshot);
         return AgentToolResult.Ok(json.ToJsonString(AgentJson.Options));
     }
 
@@ -501,6 +606,9 @@ internal static class AgentToolExecutor
                 ? AgentToolResult.Ok($"{{\"ok\":true,\"detail\":\"{Escape(action.Detail)}\"}}")
                 : AgentToolResult.Error(action.Detail);
         }
+
+        // Keep the delta baseline in sync with the state the caller just saw.
+        RememberSnapshot(snapshot);
 
         var state = (JsonObject)snapshot.Json.DeepClone();
         if (AgentActionState.ToJson() is { } lastAction)

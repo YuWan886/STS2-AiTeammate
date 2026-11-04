@@ -10,6 +10,14 @@ namespace AiTeammate.AiTeammateCode.Decision;
 public class DecisionValidator
 {
     public List<DecisionAction> Validate(List<DecisionAction> actions, Player aiPlayer)
+        => Validate(actions, aiPlayer, null);
+
+    /// <summary>
+    /// Validates one decision. When <paramref name="dropped"/> is supplied, every action this method
+    /// refuses is described there (card name + reason), so the broker can show dsh what did not run.
+    /// 校验决策；可选地把被丢弃的动作与原因写进 dropped。
+    /// </summary>
+    public List<DecisionAction> Validate(List<DecisionAction> actions, Player aiPlayer, List<string>? dropped)
     {
         var validActions = new List<DecisionAction>();
         var combat = aiPlayer.PlayerCombatState;
@@ -35,11 +43,23 @@ public class DecisionValidator
             if (action.Type == "play_card" && !string.IsNullOrWhiteSpace(action.CardName))
             {
                 var card = FindCardInHand(combat, action.CardName);
-                if (card == null) continue;
+                if (card == null)
+                {
+                    dropped?.Add($"{action.CardName}: 不在手牌");
+                    continue;
+                }
 
-                if (!combat.HasEnoughResourcesFor(card, out _)) continue;
+                if (card.Keywords.Contains(CardKeyword.Unplayable))
+                {
+                    dropped?.Add($"{action.CardName}: 不可打出");
+                    continue;
+                }
 
-                if (card.Keywords.Contains(CardKeyword.Unplayable)) continue;
+                if (!combat.HasEnoughResourcesFor(card, out var reason))
+                {
+                    dropped?.Add($"{action.CardName}: 资源不足（{reason}）");
+                    continue;
+                }
 
                 validActions.Add(action);
             }
@@ -54,7 +74,12 @@ public class DecisionValidator
                 });
                 if (potion != null)
                     validActions.Add(action);
+                else
+                    dropped?.Add($"药水{action.PotionName}: 未找到");
             }
+
+            if (action.Type is not ("play_card" or "use_potion" or "suggest_card" or "end_turn"))
+                dropped?.Add($"{action.Type}: 未知动作");
         }
 
         if (validActions.Count == 0)

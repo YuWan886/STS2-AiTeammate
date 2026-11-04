@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Platform;
 using MegaCrit.Sts2.Core.Runs;
 using AiTeammate.AiTeammateCode;
+using AiTeammate.AiTeammateCode.Agent;
 using AiTeammate.AiTeammateCode.Cache;
 using AiTeammate.AiTeammateCode.Chat;
 using AiTeammate.AiTeammateCode.Context;
@@ -107,6 +108,13 @@ public class ContextBuilder
         // 你自己
         sb.AppendLine(BuildDetailedSelfSection(aiPlayer));
 
+        if (AgentDecisionBroker.Enabled)
+        {
+            var relicLine = BuildRelicSummary(aiPlayer);
+            if (!string.IsNullOrWhiteSpace(relicLine))
+                sb.AppendLine($"遗物: {relicLine}");
+        }
+
         // 队友
         foreach (var teammate in state.Players.Where(p => p != aiPlayer))
             sb.AppendLine(BuildDetailedTeammateSection(teammate));
@@ -129,6 +137,50 @@ public class ContextBuilder
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// The player's own relics with counters and a short effect line. Only used for the external
+    /// agent: the built-in prompt intentionally drops relics (they are mostly automatic and used to
+    /// crowd a small context), but relic counters are exactly what makes an AI pick the right card
+    /// (Pen Nib 9/10, Shuriken/Kunai stacks, Orichalcum, energy relics, ...).
+    /// 外部 Agent 模式下给出遗物与计数。
+    /// </summary>
+    public string BuildRelicSummary(Player player, int maxCount = 20)
+    {
+        var relics = player.Relics?.ToList();
+        if (relics == null || relics.Count == 0)
+            return "";
+
+        var parts = new List<string>();
+        foreach (var relic in relics.Take(maxCount))
+        {
+            try
+            {
+                var name = SafeLocText(relic.Title);
+                if (string.IsNullOrWhiteSpace(name))
+                    name = relic.Id.Entry;
+
+                var counter = relic.ShowCounter ? $"[{relic.DisplayAmount}]" : "";
+                var desc = SafeLocText(relic.DynamicDescription);
+                desc = System.Text.RegularExpressions.Regex.Replace(desc, @"\[.*?\]", "");
+                desc = PromptTextHelper.CleanText(desc);
+                desc = PromptTextHelper.Truncate(desc, 70);
+
+                parts.Add(string.IsNullOrWhiteSpace(desc)
+                    ? $"{name}{counter}"
+                    : $"{name}{counter}({desc})");
+            }
+            catch
+            {
+                parts.Add(relic.Id.Entry);
+            }
+        }
+
+        if (relics.Count > maxCount)
+            parts.Add($"+{relics.Count - maxCount}");
+
+        return string.Join(" | ", parts);
     }
 
     /// <summary>构建 "你" 的详细段落：基础状态 + 手牌 + 药水</summary>
@@ -411,42 +463,62 @@ public class ContextBuilder
         return string.IsNullOrEmpty(desc) ? $"{name}{amountStr}" : $"{name}:{desc}{amountStr}";
     }
 
-    internal static string FormatIntentCompact(MoveState move)
+    internal static string FormatIntentCompact(MoveState move, Creature? owner = null)
     {
         var parts = new List<string>();
-        var atkIntents = move.Intents.OfType<AttackIntent>().ToList();
-        if (atkIntents.Count > 0)
+        var attackIntents = move.Intents.OfType<AttackIntent>().ToList();
+        if (attackIntents.Count > 0)
         {
-            // Try to get actual damage values
-            var dmgParts = new List<string>();
+            var damageParts = new List<string>();
             try
             {
                 var state = CombatManager.Instance.DebugOnlyGetState();
-                var players = state?.Players.Select(p => p.Creature) ?? Enumerable.Empty<Creature>();
-                var firstEnemy = state?.Enemies.FirstOrDefault(e => e.IsAlive);
-                foreach (var atk in atkIntents)
+                var players = state?.Players.Select(p => p.Creature).ToList() ?? new List<Creature>();
+                // The owner matters: strength/weak on THIS monster change the damage, so reading
+                // another enemy's stats (the old code always used the first enemy) was wrong.
+                var actualOwner = owner ?? state?.Enemies.FirstOrDefault(e => e.IsAlive);
+                foreach (var attack in attackIntents)
                 {
-                    if (firstEnemy != null)
+                    if (actualOwner == null)
                     {
-                        int dmg = atk.GetSingleDamage(players, firstEnemy);
-                        dmgParts.Add(dmg.ToString());
+                        damageParts.Add("?");
+                        continue;
                     }
+
+                    var single = attack.GetSingleDamage(players, actualOwner);
+                    // Multi-hit moves report hit count through Repeats (the UI shows "12×3").
+                    var repeats = attack.Repeats;
+                    damageParts.Add(repeats > 1 ? $"{single}×{repeats}" : single.ToString());
                 }
             }
-            catch { dmgParts.Add("?"); }
-            parts.Add(dmgParts.Count > 0 ? $"伤害{string.Join("/", dmgParts)}" : $"攻×{atkIntents.Count}");
+            catch { damageParts.Add("?"); }
+
+            parts.Add(damageParts.Count > 0 ? $"伤害{string.Join("/", damageParts)}" : $"攻击×{attackIntents.Count}");
         }
-        var nonAtk = move.Intents.Where(i => i is not AttackIntent)
-            .Select(i => i.IntentType switch
+
+        foreach (var intent in move.Intents.Where(candidate => candidate is not AttackIntent))
+        {
+            parts.Add(intent.IntentType switch
             {
                 IntentType.Defend => "防御",
                 IntentType.Buff => "增益",
                 IntentType.Debuff => "减益",
+                IntentType.DebuffStrong => "强减益",
+                IntentType.StatusCard => intent is StatusIntent status ? $"塞牌×{status.CardCount}" : "塞牌",
+                IntentType.CardDebuff => "卡牌弱化",
+                IntentType.Summon => "召唤",
+                IntentType.Heal => "回血",
+                IntentType.Escape => "逃跑",
+                IntentType.Sleep => "睡眠",
                 IntentType.Stun => "眩晕",
-                _ => i.IntentType.ToString()
-            }).ToList();
-        parts.AddRange(nonAtk);
-        return string.Join(",", parts);
+                IntentType.DeathBlow => "处决",
+                IntentType.Hidden => "隐藏",
+                IntentType.Unknown => "未知",
+                _ => intent.IntentType.ToString()
+            });
+        }
+
+        return parts.Count > 0 ? string.Join(",", parts) : "无";
     }
 
     private string FormatCardBrief(CardModel card)
@@ -471,7 +543,9 @@ public class ContextBuilder
         var enemyInfos = new List<string>();
         foreach (var enemy in state.Enemies.Where(e => e.IsAlive))
         {
-            var intent = enemy.Monster?.NextMove != null ? FormatIntentCompact(enemy.Monster.NextMove) : "?";
+            var intent = enemy.Monster?.NextMove != null
+                ? FormatIntentCompact(enemy.Monster.NextMove, enemy)
+                : "未知";
             // Armor decides whether an attack actually lands, so it belongs next to the HP.
             // 敌人的护甲和状态都要给，不能只给玩家。
             var powers = FormatEnemyPowers(enemy);

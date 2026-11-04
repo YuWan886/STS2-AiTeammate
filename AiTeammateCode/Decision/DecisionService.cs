@@ -381,10 +381,12 @@ public class DecisionService
         {
             sb.AppendLine("【外部大脑】本回合不再自动补牌：你的 actions 执行完后，若仍有能量/辉星且手牌里有能打出的牌（包括出牌、药水抽到的牌），系统会把最新局面再交给你决策一次；");
             sb.AppendLine("所以你只需规划眼前这一步。不想再出牌时，务必在 actions 中返回 {\"type\":\"end_turn\"} 结束回合。");
+            AppendExternalAgentTools(sb);
         }
-
-        if (allowReadTools)
+        else if (allowReadTools)
+        {
             AppendToolInstructions(sb, combat: true);
+        }
 
         return sb.ToString();
     }
@@ -420,6 +422,18 @@ public class DecisionService
         if (!string.IsNullOrWhiteSpace(runPrelude))
             sb.Append(runPrelude);
 
+        // Notes dsh wrote with sts2_note: a run plan that survives its own context compaction.
+        if (AgentDecisionBroker.Enabled)
+        {
+            var notes = AgentNotes.SnapshotForPrompt();
+            if (!string.IsNullOrWhiteSpace(notes))
+            {
+                sb.AppendLine("[AI 笔记]");
+                sb.AppendLine(notes);
+                sb.AppendLine();
+            }
+        }
+
         return sb.ToString().TrimEnd();
     }
 
@@ -436,10 +450,27 @@ public class DecisionService
         sb.AppendLine(context);
         sb.AppendLine(instruction);
 
-        if (AiSettingsStore.Current.EnableOutOfCombatReadTools || AiSettingsStore.Current.EnableScreenshotTool)
+        if (AgentDecisionBroker.Enabled)
+            AppendExternalAgentTools(sb);
+        else if (AiSettingsStore.Current.EnableOutOfCombatReadTools || AiSettingsStore.Current.EnableScreenshotTool)
             AppendToolInstructions(sb, combat: false);
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Tool hints for the external agent. dsh uses native sts2_* tools, so the built-in inline
+    /// <c>tool_calls</c> protocol is not advertised: following it would only burn a decision round
+    /// (the broker executes those calls and parks a second decision).
+    /// </summary>
+    private static void AppendExternalAgentTools(StringBuilder sb)
+    {
+        sb.AppendLine();
+        sb.AppendLine("【可用工具】你通过原生 sts2_* 工具行动，不要输出内置的 tool_calls JSON：");
+        sb.AppendLine("- sts2_state / sts2_wait：查看状态、等待游戏需要输入；");
+        sb.AppendLine("- sts2_read：按需查询遗物、牌堆、单卡、玩家、运行、地图、牌组统计（抽牌堆顺序不可见）；");
+        sb.AppendLine("- sts2_note：记录长期计划（构筑方向、Boss 对策、想买的遗物），后续决策会自动带上；");
+        sb.AppendLine("- sts2_decide：用本 prompt 要求的确切 JSON 形状提交决策。");
     }
 
     /// <summary>Advertises the read-only tools and their call format at the end of a prompt.</summary>

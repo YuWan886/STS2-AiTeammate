@@ -767,12 +767,14 @@ public class AiTeammateManager
                 }
 
                 // Back on main thread — validate and execute card actions
+                var dropped = new List<string>();
                 var validActions = result.IsFallback
                     ? Validator.ApplyFallback(AiPlayer)
-                    : Validator.Validate(result.Actions, AiPlayer);
+                    : Validator.Validate(result.Actions, AiPlayer, dropped);
                 var validDeferred = result.IsFallback
                     ? new List<DecisionAction>()
                     : Validator.ValidateDeferred(result.DeferredActions, AiPlayer);
+                RecordDecisionFeedback(result, dropped, validActions);
                 await CombatExecutor.Execute(validActions, validDeferred, AiPlayer, effectiveCt, endTurn: false);
 
                 if (IsSoloControlled && (AiFlowControl.IsPaused || CombatExecutor.PausedMidTurn))
@@ -870,6 +872,42 @@ public class AiTeammateManager
             }
         }
     }
+
+    /// <summary>Records what the validator did with dsh's last plan, for the next snapshot.</summary>
+    private static void RecordDecisionFeedback(DecisionResult result, List<string> dropped,
+        List<DecisionAction> validActions)
+    {
+        if (!AgentDecisionBroker.Enabled)
+            return;
+
+        try
+        {
+            if (result.IsFallback && dropped.Count == 0)
+                dropped.Add("整个决策无效或超时，已使用本地兜底");
+
+            var requested = result.Actions
+                .Where(action => action.Type is not ("end_turn" or "suggest_card"))
+                .Select(DescribeAgentAction)
+                .Where(text => text.Length > 0)
+                .ToList();
+            var valid = validActions.Count(action => action.Type is not "end_turn");
+            AgentDecisionFeedback.Record(AgentDecisionBroker.LastResolvedId,
+                AgentDecisionBroker.LastResolvedKind, requested, dropped, valid);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Agent] decision feedback failed: {ex.Message}");
+        }
+    }
+
+    private static string DescribeAgentAction(DecisionAction action) => action.Type switch
+    {
+        "play_card" => string.IsNullOrWhiteSpace(action.Target)
+            ? action.CardName
+            : $"{action.CardName}->{action.Target}",
+        "use_potion" => $"药水:{action.PotionName}",
+        _ => action.Type
+    };
 
     public void SetPendingRestSiteUpgradeIndices(List<int>? indices)
     {

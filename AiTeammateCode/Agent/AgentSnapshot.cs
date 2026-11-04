@@ -124,9 +124,15 @@ internal static class AgentSnapshotBuilder
         json["options"] = ctx.Options;
         json["notes"] = ctx.Notes;
 
-        // Token = hash of everything except the token itself. Any observable change flips it, so
-        // sts2_wait can tell "the animation finished / the hand changed" apart from "still waiting".
-        var tokenSource = json.ToJsonString(AgentJson.Options);
+        // Token = hash of everything except the token itself and fields that tick on their own.
+        // Any x.age_seconds (a parked decision, an unanswered chat line, the last decision feedback)
+        // changes every 100 ms; hashing it flipped the token ~10 times a second, so sts2_wait
+        // returned immediately and the autoplay loop kept re-prompting instead of blocking. Only
+        // stable fields may feed the token.
+        // Token 哈希必须剔除会自己变化的字段（各种 age_seconds），否则 token 会持续抖动。
+        var tokenSourceJson = (JsonObject)json.DeepClone();
+        StripVolatileFields(tokenSourceJson);
+        var tokenSource = tokenSourceJson.ToJsonString(AgentJson.Options);
         var token = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(tokenSource)))[..8].ToLowerInvariant();
         json["token"] = token;
 
@@ -139,6 +145,23 @@ internal static class AgentSnapshotBuilder
             BlockedBy = ctx.BlockedBy,
             AiControlled = ctx.AiControlled
         };
+    }
+
+    /// <summary>Removes self-ticking fields (currently every <c>age_seconds</c>) before token hashing.</summary>
+    private static void StripVolatileFields(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject obj:
+                obj.Remove("age_seconds");
+                foreach (var pair in obj)
+                    StripVolatileFields(pair.Value);
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                    StripVolatileFields(item);
+                break;
+        }
     }
 
     // ---- Top-level flow -------------------------------------------------------------------
@@ -156,6 +179,10 @@ internal static class AgentSnapshotBuilder
         // Chat relay state: pending lines carry the seq sts2_chat_send wants, so an autoplay loop
         // that spots the chat here can answer it before the plugin's injected block arrives.
         ctx.Json["chat"] = AgentChatRelay.SnapshotJson();
+
+        // Notes the agent wrote itself (sts2_note). Shown in every snapshot and in the decision
+        // prompt, so a run plan survives the model's own context compaction.
+        ctx.Json["ai_notes"] = AgentNotes.SnapshotJson();
         if (AgentChatRelay.UnreadCount > 0)
         {
             ctx.Notes.Add("The player wrote in the in-game chat. See chat.pending for the seq and "
@@ -179,6 +206,9 @@ internal static class AgentSnapshotBuilder
         ctx.AiPlayer = bound != null && state.Players.Contains(bound) ? bound : null;
 
         FillRunSection(ctx, state);
+
+        // A different run seed drops the previous run's notes; the same seed (save reload) keeps them.
+        AgentNotes.EnsureRun(state.Rng?.StringSeed);
 
         // The pause menu is a capstone submenu, not an overlay: without this check the snapshot would
         // report the room underneath as actionable while the player is paused.
@@ -271,6 +301,17 @@ internal static class AgentSnapshotBuilder
         // potions draw), so dsh can re-read it here instead of waiting for the next decision prompt
         // to show the new cards. 实时手牌：抽到的牌在下次决策前也能看到。
         AppendCombatJson(ctx, aiPlayer, CombatManager.Instance.DebugOnlyGetState(), withOptions: false);
+
+        // What happened to the previous answer: the validator drops actions it cannot execute
+        // (wrong card name, unaffordable, ...). Without this the model only saw "answered" and could
+        // re-hallucinate the same plan pass after pass.
+        if (AgentDecisionFeedback.SnapshotJson() is { } lastDecision)
+        {
+            ctx.Json["last_decision"] = lastDecision;
+            if (lastDecision["dropped"] is JsonArray { Count: > 0 })
+                ctx.Notes.Add("Your previous decision had actions the game dropped; see "
+                              + "last_decision.dropped before answering again.");
+        }
 
         var decision = AgentDecisionBroker.SnapshotJson();
         if (decision != null)

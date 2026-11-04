@@ -42,6 +42,19 @@ internal static class AgentDecisionBroker
     private static readonly Lock Sync = new();
     private static Pending? _pending;
     private static int _sequence;
+    private static string _lastResolvedId = "";
+    private static string _lastResolvedKind = "";
+
+    /// <summary>Id/kind of the decision accepted last, for the execution feedback snapshot.</summary>
+    public static string LastResolvedId
+    {
+        get { lock (Sync) return _lastResolvedId; }
+    }
+
+    public static string LastResolvedKind
+    {
+        get { lock (Sync) return _lastResolvedKind; }
+    }
 
     /// <summary>
     /// True when an external agent is attached with action rights: it becomes the AI's decision source.
@@ -223,6 +236,8 @@ internal static class AgentDecisionBroker
         {
             if (ReferenceEquals(_pending, pending))
                 _pending = null;
+            _lastResolvedId = pending.Id;
+            _lastResolvedKind = pending.Kind;
         }
 
         pending.Completion.TrySetResult(content);

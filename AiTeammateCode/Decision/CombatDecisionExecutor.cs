@@ -125,38 +125,58 @@ public class CombatDecisionExecutor
                 .Where(a => a.Type == "play_card" && !string.IsNullOrWhiteSpace(a.CardName))
                 .ToList();
 
-            var setupActions = new List<DecisionAction>();
-            var attackActions = new List<DecisionAction>();
-            foreach (var action in immediateActions)
+            if (AgentDecisionBroker.Enabled)
             {
-                var card = FindCardInHand(combat, action.CardName);
-                if (card == null)
+                // The external agent already reasoned about sequencing (apply Vulnerable first, draw
+                // before the payoff card, ...). Splitting the list into "all non-attacks, then all
+                // attacks" silently reordered its plan; play the actions in the order it returned.
+                // 外部大脑给出的顺序有战术含义，按原序执行。
+                cardsPlayed += await PlayPlannedActions(aiPlayer, immediateActions, "外部大脑出牌", deferredPhase: false, ct);
+                if (PausedMidTurn) return cardsPlayed;
+
+                if (deferredActions.Count > 0 && !CombatManager.Instance.IsOverOrEnding)
                 {
-                    _log.Log("AI_ACTION", $"跳过 [{action.CardName}]: 不在手牌中");
-                    continue;
+                    _log.Log("COMBAT", $"协同延迟出牌: {deferredActions.Count}张 — 等队友先行动");
+                    await WaitForCoordinationWindow(aiPlayer, deferredActions, deferredActions.Count > 0, ct);
+                    cardsPlayed += await PlayPlannedActions(aiPlayer, deferredActions, "协同延迟出牌", deferredPhase: true, ct);
+                    if (PausedMidTurn) return cardsPlayed;
+                }
+            }
+            else
+            {
+                var setupActions = new List<DecisionAction>();
+                var attackActions = new List<DecisionAction>();
+                foreach (var action in immediateActions)
+                {
+                    var card = FindCardInHand(combat, action.CardName);
+                    if (card == null)
+                    {
+                        _log.Log("AI_ACTION", $"跳过 [{action.CardName}]: 不在手牌中");
+                        continue;
+                    }
+
+                    if (card.Type == CardType.Attack)
+                        attackActions.Add(action);
+                    else
+                        setupActions.Add(action);
                 }
 
-                if (card.Type == CardType.Attack)
-                    attackActions.Add(action);
-                else
-                    setupActions.Add(action);
-            }
-
-            cardsPlayed += await PlayPlannedActions(aiPlayer, setupActions, "第1阶段出牌", deferredPhase: false, ct);
-            if (PausedMidTurn) return cardsPlayed;
-
-            var coordinatedAttackQueue = new List<DecisionAction>();
-            coordinatedAttackQueue.AddRange(deferredActions);
-            coordinatedAttackQueue.AddRange(attackActions);
-
-            if (coordinatedAttackQueue.Count > 0 && !CombatManager.Instance.IsOverOrEnding)
-            {
-                if (deferredActions.Count > 0)
-                    _log.Log("COMBAT", $"协同延迟出牌: {deferredActions.Count}张 — 等队友先行动");
-
-                await WaitForCoordinationWindow(aiPlayer, coordinatedAttackQueue, deferredActions.Count > 0, ct);
-                cardsPlayed += await PlayPlannedActions(aiPlayer, coordinatedAttackQueue, "第2阶段出牌", deferredPhase: true, ct);
+                cardsPlayed += await PlayPlannedActions(aiPlayer, setupActions, "第1阶段出牌", deferredPhase: false, ct);
                 if (PausedMidTurn) return cardsPlayed;
+
+                var coordinatedAttackQueue = new List<DecisionAction>();
+                coordinatedAttackQueue.AddRange(deferredActions);
+                coordinatedAttackQueue.AddRange(attackActions);
+
+                if (coordinatedAttackQueue.Count > 0 && !CombatManager.Instance.IsOverOrEnding)
+                {
+                    if (deferredActions.Count > 0)
+                        _log.Log("COMBAT", $"协同延迟出牌: {deferredActions.Count}张 — 等队友先行动");
+
+                    await WaitForCoordinationWindow(aiPlayer, coordinatedAttackQueue, deferredActions.Count > 0, ct);
+                    cardsPlayed += await PlayPlannedActions(aiPlayer, coordinatedAttackQueue, "第2阶段出牌", deferredPhase: true, ct);
+                    if (PausedMidTurn) return cardsPlayed;
+                }
             }
 
             // Phase 3: Play any remaining playable cards.
