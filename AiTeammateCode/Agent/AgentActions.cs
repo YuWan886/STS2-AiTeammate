@@ -114,6 +114,8 @@ internal static class AgentActions
                     return SaveRun();
                 case "sts2_quit_to_menu":
                     return QuitToMenu();
+                case "sts2_quit_app":
+                    return QuitApp();
             }
 
             var snap = AgentSnapshotBuilder.Capture();
@@ -444,6 +446,27 @@ internal static class AgentActions
         ReleaseAgentPause();
         _ = SaveAndQuitAsync();
         return new AgentActionResult(true, "Saving and returning to the main menu", 3000);
+    }
+
+    /// <summary>
+    /// Quits the game process (same as the main menu's Quit button), used by the automated tests so
+    /// they never have to kill a Steam-launched, possibly elevated process. 退出游戏进程。
+    /// </summary>
+    private static AgentActionResult QuitApp()
+    {
+        try
+        {
+            MainThread.Post(() =>
+            {
+                try { NGame.Instance?.Quit(); }
+                catch (Exception ex) { MainFile.Logger.Warn($"[Agent] quit failed: {ex.Message}"); }
+            });
+            return new AgentActionResult(true, "Quitting the game.", 200);
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Quit failed: {ex.Message}");
+        }
     }
 
     private static async Task SaveAndQuitAsync()

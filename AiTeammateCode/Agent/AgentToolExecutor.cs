@@ -69,6 +69,11 @@ internal static class AgentToolExecutor
                     return ChatSend(args);
                 case "sts2_screenshot":
                     return Screenshot();
+                case "sts2_test_shop_removal":
+                    // 回归用：替 AI 走一遍商店删牌并返回断言结果（见 DevShopRemovalSelfTest）。
+                    if (!allowActions)
+                        return AgentToolResult.Error("Action tools are disabled in the mod settings.");
+                    return await DevShopRemovalSelfTest.RunAsync();
             }
 
             if (!allowActions)
@@ -110,7 +115,8 @@ internal static class AgentToolExecutor
                 + "with sts2_host {mode}, or resume with sts2_continue_run. The menu itself is visible: "
                 + "phase=menu/char_select/daily_lobby/custom_lobby lists pressable options, sts2_choose "
                 + "presses them and sts2_proceed goes back. "
-                + "Run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon. "
+                + "Run control is sts2_pause / sts2_resume / sts2_save / sts2_quit_to_menu / sts2_abandon; "
+                + "sts2_quit_app quits the game process itself (automated tests use it). "
                 + "sts2_set_nickname changes the AI teammate's display name at any time. "
                 + "Record a long-run plan with sts2_note {text} — the mod shows it back in later "
                 + "decision prompts and snapshots. "

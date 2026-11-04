@@ -578,3 +578,14 @@ dsh --profile web --dump-config
 - 把动作工具拆成更细的 UI 呈现（dsh 卡片式工具结果）。
 - `sts2_say`：把 dsh 的发言显示在游戏聊天面板/气泡里。
 - 让插件用 `ctx.goals` 持久化“本局目标”，跨进程恢复接管。
+
+## 14. 开发自检工具（无人工回归）
+
+给「不想手动开游戏进商店」的场景准备的两件东西：
+
+- **`sts2_quit_app`**（控制动作）：等价主菜单的「退出」，让游戏自己结束进程。自动化测试用它收尾——Steam 以管理员启动时外部进程 `Stop-Process` 会被拒绝，游戏自己退则没有这个限制。
+- **`sts2_test_shop_removal`**（测试动作，需要 `allow_actions`）：在一局进行中的对局里替 AI 直接走一遍商店删牌（`AiCardShopRemoval`），并回传断言用的 JSON：
+  `pass / purchased / cost / ai_gold_before|after / ai_deck_before|after / removed_cards / removals_used / entry_used / human_is_ai / human_gold_before|after / human_deck_before|after / overlays_before|after / log / failed_assertions`。
+  断言覆盖：AI 金币只少一份价格、AI 牌组只少一张、删牌项标记已用、真人金币与牌组不变、真人没有新 overlay。动作会消耗 AI 的商店随机数并真的改对局数据，只用于一次性测试局。
+- **`tools/test-shop-removal.ps1`**：把上面这些串起来的回归脚本。`-Launcher steam|exe|bat`（默认 `steam`，Steamworks 正常初始化、没有弹窗；`exe`/`bat` 不经过 Steam，实测主菜单会弹「Steam 未初始化」模态框，需要手动点掉）、`-ReuseGame`（复用已开的游戏）、`-KeepGame`（跑完不关游戏）、`-Character`、`-ExtraArgs`。跑完默认 `sts2_abandon` 放弃测试存档并 `sts2_quit_app` 关闭游戏；任一环节撞到 `NGenericPopup` 模态会直接报错退出（bridge 点不动模态按钮）。
+  已知限制：`--headless` 能加载 mod 与桥接，但主菜单会带一个 `NGenericPopup` 模态，动作被拒，所以脚本仍用窗口模式启动。
