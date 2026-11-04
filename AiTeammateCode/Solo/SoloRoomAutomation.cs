@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.AutoSlay.Helpers;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -308,7 +309,11 @@ public static class SoloRoomAutomation
                 bool success;
                 try
                 {
-                    success = await entry.OnTryPurchaseWrapper(inventory);
+                    // 删牌走 AI 自己的牌堆与金币。单人是 AI 自己当本地玩家，走原路也不会错，
+                    // 但保持和多人同一条正确路径，避免任何情况下误删真人的牌。
+                    success = entry is MerchantCardRemovalEntry removalEntry
+                        ? await AiCardShopRemoval.TryBuyAsync(aiPlayer, removalEntry, msg => manager.AiLog.Log("SHOP", msg))
+                        : await entry.OnTryPurchaseWrapper(inventory);
                 }
                 catch (Exception ex)
                 {
@@ -319,6 +324,12 @@ public static class SoloRoomAutomation
                 manager.AiLog.Log("SHOP", $"购买结果: {(success ? "成功" : "失败")} | Gold={aiPlayer.Gold}");
                 if (!success)
                     break;
+
+                // 删牌槽位是 UI 手动刷新的（游戏原流程在 DoMerchantCardRemoval 里做），这里补上。
+                if (entry is MerchantCardRemovalEntry)
+                {
+                    try { room.Inventory.OnCardRemovalUsed(); } catch { }
+                }
 
                 await Task.Delay(250);
             }

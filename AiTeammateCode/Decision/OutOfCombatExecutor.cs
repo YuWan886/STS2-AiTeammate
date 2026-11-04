@@ -126,7 +126,11 @@ public class OutOfCombatExecutor
                 log.Log("AI_ACTION", $"购买: {shopEntries[idx].DisplayText}");
                 log.Log("SHOP", $"AI buying: {chosen.GetType().Name} for {chosen.Cost} gold");
 
-                bool success = await chosen.OnTryPurchaseWrapper(inventory, false);
+                // 删牌绝不能走 MerchantCardRemovalEntry.OnTryPurchase：那条路固定作用在 LocalPlayer
+                // （真人）身上，会删真人的牌、扣真人的钱，还会给真人弹一个选牌界面。详见 AiCardShopRemoval。
+                bool success = chosen is MerchantCardRemovalEntry removalEntry
+                    ? await AiCardShopRemoval.TryBuyAsync(aiPlayer, removalEntry, msg => log.Log("SHOP", msg))
+                    : await chosen.OnTryPurchaseWrapper(inventory, false);
                 log.Log("SHOP", $"Purchase result: {(success ? "success" : "failed")} | Gold remaining: {aiPlayer.Gold}");
 
                 if (success)
