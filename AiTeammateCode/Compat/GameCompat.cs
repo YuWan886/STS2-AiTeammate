@@ -1,9 +1,13 @@
+using System.Collections;
+using System.Threading.Tasks;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Multiplayer.Game.Lobby;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace AiTeammate.AiTeammateCode.Compat;
 
@@ -91,5 +95,55 @@ internal static class GameCompat
         if (readyPlayers != null && readyPlayers.Add(netId))
             lobby.LobbyListener.PlayerReadyChanged(netId);
 #endif
+    }
+
+    /// <summary>
+    /// Completes the resting AI player's rest-site slot in <see cref="RestSiteSynchronizer"/>.
+    ///
+    /// 0.111 made <c>RestSiteRoom.Exit</c> await <c>RestSiteSynchronizer.AfterAllRestSitesCompleted()</c>,
+    /// which awaits every <c>PlayerRestSite.completionTaskSource</c>. A player's slot is normally
+    /// completed by its own OptionIndexChosen / RestSiteSkipped message, but an AI teammate has no
+    /// net peer, so nothing ever arrives for it: the room exit never resumes and the next map travel
+    /// parks on the fade-out (a black screen). 0.107 has no completion source — this is a no-op there.
+    /// </summary>
+    public static void CompleteAiRestSiteSlot(RestSiteSynchronizer sync, Player player)
+    {
+        try
+        {
+            var syncType = typeof(RestSiteSynchronizer);
+            if (AccessTools.Field(syncType, "_restSites")?.GetValue(sync) is not IList restSites)
+                return;
+            if (AccessTools.Field(syncType, "_playerCollection")?.GetValue(sync) is not IPlayerCollection collection)
+                return;
+
+            var slot = collection.GetPlayerSlotIndex(player);
+            if (slot < 0 || slot >= restSites.Count)
+                return;
+
+            CompleteRestSiteSlot(restSites[slot]);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[REST] CompleteAiRestSiteSlot failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Clears a single <c>PlayerRestSite</c>'s remaining options and completes its task source.
+    /// Takes <see cref="object"/> because <c>PlayerRestSite</c> is a private nested type.
+    /// </summary>
+    public static void CompleteRestSiteSlot(object? playerRestSite)
+    {
+        if (playerRestSite == null)
+            return;
+
+        var type = playerRestSite.GetType();
+
+        // Vanilla clears whatever is left when a player's rest site ends; the AI never picks twice.
+        if (AccessTools.Field(type, "options")?.GetValue(playerRestSite) is IList options)
+            options.Clear();
+
+        if (AccessTools.Field(type, "completionTaskSource")?.GetValue(playerRestSite) is TaskCompletionSource completion)
+            completion.TrySetResult();
     }
 }

@@ -811,12 +811,41 @@ public static class RestSiteBeginPatch
                 beforeEvent?.Invoke(chosenOption, aiPlayer.NetId);
             }
             catch { /* optional */ }
+
+            // 0.111: RestSiteRoom.Exit awaits AfterAllRestSitesCompleted(), which awaits every
+            // PlayerRestSite completion source. The AI has no net peer, so nothing else ever completes
+            // its slot — without this the room exit hangs and the next map travel shows a black screen.
+            GameCompat.CompleteAiRestSiteSlot(sync, aiPlayer);
+            log.Log("REST", "AI rest site slot completed");
         }
         catch (Exception ex)
         {
             log.Log("REST", $"UpdateSyncStateDirectly error: {ex.Message}");
             MainFile.Logger.Warn($"[REST] UpdateSyncStateDirectly: {ex.Message}");
         }
+    }
+}
+
+// ---- Safety net: a room exit must never wait forever on the AI's rest-site slot ----
+// Reached when the choice path failed to find the AI's PlayerRestSite entry (or the human travelled
+// while the AI's decision was still in flight). Without it, RestSiteRoom.Exit awaits forever and the
+// game sits on the black fade-out.
+[HarmonyPatch(typeof(RestSiteSynchronizer), "AfterAllRestSitesCompleted")]
+public static class RestSiteCompletionSafetyPatch
+{
+    [HarmonyPrefix]
+    public static void Prefix()
+    {
+        var manager = AiTeammateManager.Instance;
+        if (!manager.IsInitialized || manager.AiPlayer == null) return;
+
+        // Solo climb: the AI owns the local player, so the vanilla local-player path completes the slot.
+        if (SoloRunController.IsActive) return;
+
+        var sync = RunManager.Instance?.RestSiteSynchronizer;
+        if (sync == null) return;
+
+        GameCompat.CompleteAiRestSiteSlot(sync, manager.AiPlayer);
     }
 }
 
