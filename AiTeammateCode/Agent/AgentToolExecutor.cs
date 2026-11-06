@@ -69,11 +69,6 @@ internal static class AgentToolExecutor
                     return ChatSend(args);
                 case "sts2_screenshot":
                     return Screenshot();
-                case "sts2_test_shop_removal":
-                    // 回归用：替 AI 走一遍商店删牌并返回断言结果（见 DevShopRemovalSelfTest）。
-                    if (!allowActions)
-                        return AgentToolResult.Error("Action tools are disabled in the mod settings.");
-                    return await DevShopRemovalSelfTest.RunAsync();
             }
 
             if (!allowActions)

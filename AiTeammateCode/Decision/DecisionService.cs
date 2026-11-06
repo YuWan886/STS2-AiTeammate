@@ -1,4 +1,5 @@
 using System.Text;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Models;
 using AiTeammate.AiTeammateCode;
@@ -364,10 +365,11 @@ public class DecisionService
         sb.AppendLine();
         sb.AppendLine("请以 JSON 格式返回你的战斗决策（json output required）：");
         sb.AppendLine("```json");
-        sb.AppendLine("{\"thinking\":\"战术分析\",\"chat_message\":\"简短沟通(可选)\",\"actions\":[{\"type\":\"play_card\",\"card_name\":\"卡名\",\"target\":\"敌人名或空\"},{\"type\":\"use_potion\",\"potion_name\":\"药水名\",\"target\":\"目标\"},{\"type\":\"end_turn\"}],\"deferred_actions\":[{\"type\":\"deferred_attack\",\"card_name\":\"攻击牌名\",\"target\":\"敌人名\",\"wait_for\":\"等待队友某种行为后打出\"}]}");
+        sb.AppendLine("{\"thinking\":\"战术分析\",\"chat_message\":\"简短沟通(可选)\",\"actions\":[{\"type\":\"play_card\",\"card_name\":\"卡名\",\"target\":\"敌人名或#索引\"},{\"type\":\"use_potion\",\"potion_name\":\"药水名\",\"target\":\"目标\"},{\"type\":\"end_turn\"}],\"deferred_actions\":[{\"type\":\"deferred_attack\",\"card_name\":\"攻击牌名\",\"target\":\"敌人名或#索引\",\"wait_for\":\"等待队友某种行为后打出\"}]}");
         sb.AppendLine("```");
         sb.AppendLine();
         sb.AppendLine("注意: card_name必须精确匹配手牌中的卡名。攻击牌通常必须指定敌人名；若你要给队友打支援牌或给队友用药水，target 可以写玩家名、角色名或“玩家”。");
+        sb.AppendLine("【目标写法】敌人行开头的 [#n] 是索引（与快照 combat.enemies[].index 同一个数），可以直接写 target:\"#[n]\"，也可以写 名字(当前血/上限) 精确指定；同名敌人只写名字会因歧义被丢弃（系统不会随便挑一个打）。索引以最新一条快照为准。");
         sb.AppendLine("【药水使用】药水不消耗能量，是免费行动！每回合都应该考虑使用。potion_name必须精确匹配你拥有的药水名称，target 写 Self 表示给自己用。");
         sb.AppendLine("【能量约束】actions 中所有 play_card 的合计费用不能超过你当前的可用能量（含辉星）。deferred_actions 中的攻击牌也会消耗能量，请确保 actions + deferred_actions 总费用 ≤ 当前能量。");
         sb.AppendLine("chat_message: 用角色语气简短沟通，不超过20字。");
@@ -1036,4 +1038,12 @@ public class DecisionAction
     public string Player { get; set; } = "";
     public string Reason { get; set; } = "";
     public string WaitFor { get; set; } = "";
+
+    /// <summary>
+    /// The creature <see cref="Target"/> resolved to when the plan was validated. The executor plays
+    /// this exact instance instead of re-resolving the string, so a mid-pass kill that shifts the enemy
+    /// list cannot retarget the card (and two same-named enemies cannot be swapped).
+    /// 校验阶段锁定的目标实例，执行时直接用它，避免中途死亡导致索引漂移。
+    /// </summary>
+    public Creature? ResolvedTarget { get; set; }
 }

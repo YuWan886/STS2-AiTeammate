@@ -307,29 +307,82 @@ public class CombatDecisionExecutor
                 continue;
             }
 
-            var target = FindTarget(state, aiPlayer, action.Target);
+            var target = ResolvePlannedTarget(state, aiPlayer, card, action);
+            if (target.IsError)
+                continue;
+
             if (deferredPhase)
             {
                 var waitReason = string.IsNullOrWhiteSpace(action.WaitFor) ? "等待队友先行动" : action.WaitFor;
                 _log.Log("AI_ACTION", $"协同出牌 [{card.Title ?? card.Id.Entry}] — 等待原因: {waitReason}");
             }
 
-            await PlayOneCard(aiPlayer, state, card, target);
-            AiTeammateManager.Instance.DirectiveManager.RegisterExecutedAction(aiPlayer, action);
-            played++;
+            if (await PlayOneCard(aiPlayer, state, card, target.Creature))
+            {
+                AiTeammateManager.Instance.DirectiveManager.RegisterExecutedAction(aiPlayer, action);
+                played++;
+            }
             _log.Log("AI_ACTION", $"{phaseLabel}: [{card.Title ?? card.Id.Entry}]");
         }
 
         return played;
     }
 
-    private async Task PlayOneCard(Player aiPlayer, CombatState state, CardModel card, Creature? target)
+    /// <summary>
+    /// Target for a planned action: the instance locked by the validator first (so a mid-pass kill
+    /// cannot swap two same-named enemies or shift an index), else a fresh unresolvable-set resolution.
+    /// Errors are logged and make the caller skip the card — never a random target.
+    /// </summary>
+    private TargetResolution ResolvePlannedTarget(CombatState state, Player aiPlayer, CardModel card,
+        DecisionAction action)
     {
+        var scope = card.TargetType == TargetType.AnyEnemy ? TargetScope.Enemy
+            : card.TargetType == TargetType.AnyAlly ? TargetScope.Ally
+            : (TargetScope?)null;
+        if (scope == null)
+            return TargetResolution.None;
+
+        var locked = action.ResolvedTarget;
+        if (locked != null)
+        {
+            if (locked.IsAlive)
+                return TargetResolution.Ok(locked, CombatTargetResolver.IndexOf(state, locked));
+            _log.Log("AI_ACTION",
+                $"跳过 [{card.Title ?? card.Id.Entry}]: 锁定目标 {CombatTargetResolver.Describe(state, locked)} 已死亡");
+            return TargetResolution.Fail("锁定目标已死亡");
+        }
+
+        var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, scope.Value);
+        if (resolved.IsError)
+        {
+            _log.Log("AI_ACTION", $"跳过 [{card.Title ?? card.Id.Entry}]: {resolved.Error}");
+            return resolved;
+        }
+        if (resolved.Creature == null)
+        {
+            _log.Log("AI_ACTION", $"跳过 [{card.Title ?? card.Id.Entry}]: 缺少目标");
+            return TargetResolution.Fail("缺少目标");
+        }
+        return resolved;
+    }
+
+    private async Task<bool> PlayOneCard(Player aiPlayer, CombatState state, CardModel card, Creature? target)
+    {
+        // CardCmd.AutoPlay(null) picks a RANDOM enemy for AnyEnemy (and a random other ally for
+        // AnyAlly). A caller that reaches this point without a target has a bug; refusing is always
+        // better than silently hitting the wrong creature. 需要目标却没目标：拒绝，绝不随机。
+        if (card.TargetType is TargetType.AnyEnemy or TargetType.AnyAlly && target == null)
+        {
+            _log.LogError("AI_PLAY", $"拒绝出牌 [{card.Title ?? card.Id.Entry}]: 需要目标但解析为空（拒绝随机目标）");
+            return false;
+        }
+
         var cost = PromptTextHelper.ResolveEnergyCost(card);
         var starCost = Math.Max(0, card.GetStarCostWithModifiers());
         var preEnergy = aiPlayer.PlayerCombatState?.Energy ?? 0;
         var preStars = aiPlayer.PlayerCombatState?.Stars ?? 0;
-        _log.LogCardPlay(card.Title ?? card.Id.Entry, target?.Name ?? target?.Monster?.Id.Entry);
+        _log.LogCardPlay(card.Title ?? card.Id.Entry,
+            target != null ? CombatTargetResolver.Describe(state, target) : null);
 
         // HookPlayerChoiceContext only enqueues/resumes choice hooks when localPlayerId
         // matches the hook action owner. For AI-controlled cards that need a follow-up
@@ -363,6 +416,8 @@ public class CombatDecisionExecutor
             aiPlayer.PlayerCombatState.LoseStars(starCost);
             _log.Log("AI_DEBUG", $"强制扣除辉星: {preStars}→{aiPlayer.PlayerCombatState.Stars}");
         }
+
+        return true;
     }
 
     private async Task<bool> UseOnePotion(Player aiPlayer, CombatState state, DecisionAction action, CancellationToken ct)
@@ -383,12 +438,36 @@ public class CombatDecisionExecutor
             return false;
         }
 
-        // Find target if specified
-        Creature? target = null;
-        if (!string.IsNullOrWhiteSpace(action.Target))
+        // Target: the instance locked at validation time, else a fresh resolution. A potion that
+        // needs an enemy never falls back to a random target (the old path passed null, and
+        // UsePotionAction/AutoPlay picked one at random). 药水目标同样不允许随机。
+        var potionScope = potion.TargetType == TargetType.AnyEnemy ? TargetScope.Enemy
+            : potion.TargetType == TargetType.AnyAlly ? TargetScope.Ally
+            : (TargetScope?)null;
+
+        TargetResolution resolution = TargetResolution.None;
+        if (potionScope is { } scope)
         {
-            target = FindTarget(state, aiPlayer, action.Target);
+            if (action.ResolvedTarget is { IsAlive: true } locked)
+                resolution = TargetResolution.Ok(locked, CombatTargetResolver.IndexOf(state, locked));
+            else
+                resolution = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, scope);
+
+            if (resolution.IsError)
+            {
+                _log.Log("AI_ACTION",
+                    $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: {resolution.Error}");
+                return false;
+            }
+            if (resolution.Creature == null)
+            {
+                _log.Log("AI_ACTION",
+                    $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: 缺少目标");
+                return false;
+            }
         }
+
+        var target = resolution.Creature;
 
         // If potion targets Self and no target specified, target the AI player
         if (target == null && potion.TargetType == TargetType.Self)
@@ -396,7 +475,9 @@ public class CombatDecisionExecutor
             target = aiPlayer.Creature;
         }
 
-        _log.Log("AI_ACTION", $"使用药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]{(target != null ? $" -> {target.Name}" : "")}");
+        _log.Log("AI_ACTION",
+            $"使用药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]"
+            + (target != null ? $" -> {CombatTargetResolver.Describe(state, target)}" : ""));
 
         // Multiplayer: the host owns the AI's potion action. A follower must not enqueue a second
         // copy (that used to consume a potion twice, or even the human's potion before the action
@@ -468,11 +549,7 @@ public class CombatDecisionExecutor
             if (attacks.Count > 0)
             {
                 bestCard = attacks[0];
-                bestTarget = !string.IsNullOrWhiteSpace(preferredTargetName)
-                    ? state.Enemies.FirstOrDefault(e =>
-                        e.IsAlive
-                        && (MatchesTargetAlias(e.Name, preferredTargetName) || MatchesTargetAlias(e.Monster?.Id.Entry, preferredTargetName)))
-                    : null;
+                bestTarget = ResolvePreferredTarget(state, aiPlayer, preferredTargetName);
                 bestTarget ??= state.Enemies.Where(e => e.IsAlive).OrderBy(e => e.CurrentHp).FirstOrDefault();
             }
             else if (enemyAttacking)
@@ -490,8 +567,8 @@ public class CombatDecisionExecutor
             if (bestCard == null) break;
 
             _log.Log("AI_ACTION", $"额外出牌: [{bestCard.Title ?? bestCard.Id.Entry}]");
-            await PlayOneCard(aiPlayer, state, bestCard, bestTarget);
-            extraPlayed++;
+            if (await PlayOneCard(aiPlayer, state, bestCard, bestTarget))
+                extraPlayed++;
         }
 
         return extraPlayed;
@@ -716,82 +793,14 @@ public class CombatDecisionExecutor
             || c.Id.Entry.Contains(cardName, System.StringComparison.OrdinalIgnoreCase));
     }
 
-    private Creature? FindTarget(CombatState state, Player aiPlayer, string targetName)
+    /// <summary>Directive focus target ("focus the left one", "打 #1"), resolved through the shared resolver.</summary>
+    private static Creature? ResolvePreferredTarget(CombatState state, Player aiPlayer, string? preferredTargetName)
     {
-        if (string.IsNullOrWhiteSpace(targetName)) return null;
+        if (string.IsNullOrWhiteSpace(preferredTargetName))
+            return null;
 
-        var normalized = NormalizeTargetText(targetName);
-        if (normalized is "你" or "你自己" or "自己" or "ai" or "self" or "me" or "myself" or "you")
-            return aiPlayer.Creature;
-
-        var enemy = state.Enemies.FirstOrDefault(e =>
-            MatchesTargetAlias(e.Name, targetName) || MatchesTargetAlias(e.Monster?.Id.Entry, targetName));
-        if (enemy != null)
-            return enemy;
-
-        var player = state.Players.FirstOrDefault(p => MatchesPlayerAlias(p, aiPlayer, normalized, targetName));
-        if (player != null)
-            return player.Creature;
-
-        if (normalized is "我" or "我自己" or "玩家" or "人类玩家" or "队友"
-            or "player" or "human" or "teammate" or "ally")
-            return state.Players.FirstOrDefault(p => p != aiPlayer && p.Creature.IsAlive)?.Creature;
-
-        return null;
-    }
-
-    private static bool MatchesPlayerAlias(Player player, Player aiPlayer, string normalizedTarget, string rawTarget)
-    {
-        if (player == aiPlayer && normalizedTarget is not "你" and not "你自己" and not "自己"
-            and not "ai" and not "self" and not "me" and not "myself" and not "you")
-            return false;
-
-        var aliases = new[]
-        {
-            GetPlayerDisplayName(player),
-            player.Character?.Id.Entry ?? "",
-            $"玩家{(int)(player.NetId & 0xFFFF)}"
-        };
-
-        return aliases.Any(alias => MatchesTargetAlias(alias, rawTarget));
-    }
-
-    private static bool MatchesTargetAlias(string? alias, string targetName)
-    {
-        if (string.IsNullOrWhiteSpace(alias) || string.IsNullOrWhiteSpace(targetName))
-            return false;
-
-        var left = NormalizeTargetText(alias);
-        var right = NormalizeTargetText(targetName);
-        return left.Contains(right, StringComparison.OrdinalIgnoreCase)
-            || right.Contains(left, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizeTargetText(string value)
-    {
-        var cleaned = PromptTextHelper.CleanText(value ?? "");
-        cleaned = cleaned.Replace(" ", "", StringComparison.Ordinal)
-            .Replace("\r", "", StringComparison.Ordinal)
-            .Replace("\n", "", StringComparison.Ordinal)
-            .Trim();
-        return cleaned.ToLowerInvariant();
-    }
-
-    private static string GetPlayerDisplayName(Player player)
-    {
-        try
-        {
-            var platform = RunManager.Instance?.NetService?.Platform;
-            if (platform.HasValue)
-            {
-                var name = PlatformUtil.GetPlayerName(platform.Value, player.NetId);
-                if (!string.IsNullOrWhiteSpace(name))
-                    return name;
-            }
-        }
-        catch { }
-
-        return player.Character?.Id.Entry ?? $"玩家{(int)(player.NetId & 0xFFFF)}";
+        var resolved = CombatTargetResolver.Resolve(state, aiPlayer, preferredTargetName, TargetScope.Enemy);
+        return resolved.IsError ? null : resolved.Creature;
     }
 
     private sealed class CoordinationSnapshot

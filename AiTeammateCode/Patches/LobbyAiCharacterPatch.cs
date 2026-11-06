@@ -33,10 +33,10 @@ internal static class LobbyAiCharacterPanelPatch
             switch (screen)
             {
                 case NDailyRunScreen daily:
-                    LobbyAiCharacterPanel.Attach(daily, () => SafeDailyLobby(daily), LobbyAiScreenKind.Daily);
+                    LobbyAiCharacterPanel.Attach(daily, () => SafeDailyLobby(daily));
                     break;
                 case NCustomRunScreen custom:
-                    LobbyAiCharacterPanel.Attach(custom, () => SafeCustomLobby(custom), LobbyAiScreenKind.Custom);
+                    LobbyAiCharacterPanel.Attach(custom, () => SafeCustomLobby(custom));
                     break;
             }
         }

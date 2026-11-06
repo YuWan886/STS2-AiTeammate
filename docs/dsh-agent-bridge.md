@@ -40,7 +40,7 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 - 计划里显式返回 `{"type":"end_turn"}` 时立即停止追加决策（内置后端也尊重该动作，只是它的 Phase 3 已经先出完剩余牌）。
 - `ai_decision` / `ai_busy` 两种快照都带上了 `combat` 段（实时手牌、能量/辉星、敌人、牌堆张数）。执行期间（`ai_busy`）也可以用 `sts2_state` 直接看到抽到的牌；`options` 在 AI 模式下仍为空——出牌要用 `sts2_decide`，不用索引。
 - `combat.hand[].cost` 是**当前实际费用**（升级降费、临时费用修正都算进去，如「全身撞击+」= 0）；`upgraded` 表示是否已经升级。`card_reward` / `card_select` / `card_choice` 的 `detail` 末尾会跟一句「升级后: …」，未升级的卡可以直接比较升级收益。
-- `combat.enemies[]` 带 `hp / max_hp / block / powers / alive / intent`：`block` 是护甲，`powers` 与 `player.powers` 同构（`name / id / amount`，含负面层数），`intent` 是当回合意图；已死敌人也留在列表里（`alive:false`），方便判断复活/召唤。
+- `combat.enemies[]` 带 `index / label / hp / max_hp / block / powers / alive / intent`：`index` 是该敌人在 `CombatState.Enemies` 里的下标（默认按遭遇槽位排序，约等于画面从左到右），`label` 就是 `名字[#索引]`；`block` 是护甲，`powers` 与 `player.powers` 同构（`name / id / amount`，含负面层数），`intent` 是当回合意图；已死敌人也留在列表里（`alive:false`），方便判断复活/召唤。
 - 决策内容里返回 `tool_calls`（`read_pile` / `card_info` …）同样有效：游戏在主线程执行完只读工具，把结果拼进新 prompt 后**再挂一次决策**，不会像以前那样掉进启发式兜底。图片类工具（`screenshot`）没有图像回传通道，`sts2_screenshot` 请当作独立工具调用。
 - 内置 LLM 后端行为不变：仍是每回合最多 3 次决策，Phase 3 照常补牌。
 
@@ -80,6 +80,25 @@ v2.3 及以前，只要 `RunManager` 没有局内状态，快照就一律报 `ph
 - `sts2_start_run {mode: standard|daily|custom, character, ascension, seed, modifiers[]}`。`daily` 不接收角色/进阶/种子/词条：报名日期取 `TimeServer.FetchDailyTime`（失败时回退本地时间，与游戏一致），种子按 `dd_MM_yyyy_1p` 规范化，角色/进阶/2 好 1 坏词条用与 `NDailyRunScreen.SetupLobbyParams` 相同的 RNG 链复算（`DailyRunCompat`，0.107/0.111 的 RNG 差异隔离在 Compat 里），最终以 `GameMode.Daily` + `dailyTime` 直接开局。`custom` 会校验并解析 `modifiers`（id 或名称；`CharacterCards:<角色id>` 可指定牌组来源），互斥词条会拒绝。
 - `sts2_host {mode}`：在干净的主菜单根上打开多人子菜单并 `FastHost(mode)`。**每日/自定大厅没有「添加 AI」按钮，房主一人永远满足不了 `IsAboutToBeginGame`**（多人大厅 1 人拒绝开局），所以 `StartRunLobby.AddLocalHostPlayer` 之后会自动加入 AI 队友并标记 ready；标准大厅仍由角色选择界面的 `ai_join` 选项一键加入 + 准备。
 - 开局/建房/续档都要求主菜单根（`SubmenuStack.Peek() == null`）：任何大厅/子菜单打开时都会被拒绝并提示先 `sts2_proceed`。这堵上了“在大厅里误开单人局”的洞。
+
+
+### 1.6 目标寻址：同名敌人不再“取第一个”（v2.4.4）
+
+旧实现里 `target` 只是个名字字符串，`CombatDecisionExecutor` 用「名字/id 双向包含」取 `FirstOrDefault`：两只同名敌人时永远命中列表里靠前的那只（和血量无关），写「名字 12/50」也还是第一只；而名字匹配不上（比如只写了索引数字）时 `target` 变 null，`CardCmd.AutoPlay` 对 `AnyEnemy` 会**随机**挑一个存活敌人——两种情况都不报错，看上去还成功。
+
+v2.4.4 起：
+
+- 新增 `Decision/CombatTargetResolver.cs`，是敌人/队友目标的唯一解析入口（AI 决策、校验器、本地动作 `sts2_play_card` 共用）。支持的写法：
+  - `"#[n]"` / `"[n]"` 之外的纯数字 `"n"`：按 `combat.enemies[].index` 取，越界或已死亡会明确报错；
+  - `"名字#n"` / `"名字[n]"` 会额外校验第 n 个敌人的名字是否与请求一致，不一致就报“索引已过期”；
+  - 敌人名 / 怪物 id；只写名字且同名敌人 >1 时**返回歧义错误**（列出候选 `#0, #1`），不再静默取第一个；
+  - `"名字(12/50)"`（当前血/上限）可精确指定同名敌人中的一只；
+  - 自身别名（`self`/`我`/`自己`…）与玩家名（队友支援牌/药水）。
+- `DecisionAction.ResolvedTarget`：校验阶段就把目标锁成具体 `Creature`，执行时直接用这个实例。这样同一回合里前面的牌打死一个敌人、`Enemies` 下标前移，也不会把后面的牌打到另一只身上。
+- 目标解析失败的动作会被 `DecisionValidator` 丢弃并写进 `last_decision.dropped`；执行器 `PlayOneCard` 另有一道兜底：需要目标却拿到 null 时**拒绝出牌**，绝不交给 `AutoPlay` 随机。
+- `last_decision` 新增 `resolved`：`["打击->骷髅[#1]", ...]`，dsh 能直接看到每张牌实际锁定的实例；战斗日志也写成 `Name[#n]`。
+- 战斗 prompt 的敌人行改为 `[#0] 名字(血/上限 格挡) 意图`，并明确提示“同名敌人必须用 [#n] 或 名字(血/上限)”；快照在存在同名存活敌人时会在 `notes` 里提醒。
+- 聊天 `focus_target` 指令同样支持 `#n` 与血量写法。
 
 
 ## 2. 为什么用 dsh 插件而不是 MCP
@@ -557,6 +576,7 @@ dsh --profile web --dump-config
 | `AiTeammateCode/Compat/DailyRunCompat.cs` | **v2.4**：每日种子/角色/进阶/2 好 1 坏词条复算（0.107/0.111 RNG 差异） |
 | `AiTeammateCode/Patches/DailyCustomLobbyAiPatch.cs` | **v2.4**：每日/自定多人房创建时自动加入并准备 AI 队友 |
 | `AiTeammateCode/Agent/AgentDecisionBroker.cs` | v2：把 AI 的决策调用挂起，等 dsh 用 `sts2_decide` 回答 |
+| `AiTeammateCode/Decision/CombatTargetResolver.cs` | **v2.4.4**：敌人/队友目标的唯一解析入口（索引 / #索引 / 同名歧义 / 血量消歧 / 存活过滤） |
 | `AiTeammateCode/Agent/AgentChatRelay.cs` | v2.3：聊天中继（玩家发言队列、`sts2_chat_poll` / `sts2_chat_send`、能力探测、超时回退） |
 | `AiTeammateCode/Settings/AiSettings.cs` | 4 个新设置字段 |
 | `AiTeammateCode/Settings/AiSettingsPage.cs` | 新分区、状态段落、重启按钮 |
@@ -582,13 +602,8 @@ dsh --profile web --dump-config
 - `sts2_say`：把 dsh 的发言显示在游戏聊天面板/气泡里。
 - 让插件用 `ctx.goals` 持久化“本局目标”，跨进程恢复接管。
 
-## 14. 开发自检工具（无人工回归）
-
-给「不想手动开游戏进商店」的场景准备的两件东西：
+## 14. 开发自检工具
 
 - **`sts2_quit_app`**（控制动作）：等价主菜单的「退出」，让游戏自己结束进程。自动化测试用它收尾——Steam 以管理员启动时外部进程 `Stop-Process` 会被拒绝，游戏自己退则没有这个限制。
-- **`sts2_test_shop_removal`**（测试动作，需要 `allow_actions`）：在一局进行中的对局里替 AI 直接走一遍商店删牌（`AiCardShopRemoval`），并回传断言用的 JSON：
-  `pass / purchased / cost / ai_gold_before|after / ai_deck_before|after / removed_cards / removals_used / entry_used / human_is_ai / human_gold_before|after / human_deck_before|after / overlays_before|after / log / failed_assertions`。
-  断言覆盖：AI 金币只少一份价格、AI 牌组只少一张、删牌项标记已用、真人金币与牌组不变、真人没有新 overlay。动作会消耗 AI 的商店随机数并真的改对局数据，只用于一次性测试局。
-- **`tools/test-shop-removal.ps1`**：把上面这些串起来的回归脚本。`-Launcher steam|exe|bat`（默认 `steam`，Steamworks 正常初始化、没有弹窗；`exe`/`bat` 不经过 Steam，实测主菜单会弹「Steam 未初始化」模态框，需要手动点掉）、`-ReuseGame`（复用已开的游戏）、`-KeepGame`（跑完不关游戏）、`-Character`、`-ExtraArgs`。跑完默认 `sts2_abandon` 放弃测试存档并 `sts2_quit_app` 关闭游戏；任一环节撞到 `NGenericPopup` 模态会直接报错退出（bridge 点不动模态按钮）。
-  已知限制：`--headless` 能加载 mod 与桥接，但主菜单会带一个 `NGenericPopup` 模态，动作被拒，所以脚本仍用窗口模式启动。
+- 一次性回归脚手架（商店删牌 `sts2_test_shop_removal` + `tools/test-shop-removal.ps1`、同名敌人寻址 `sts2_test_targeting` + `tools/test-targeting.ps1`）在验证通过后已按用户要求删除，需要回归时按 git 历史恢复即可；`--headless` 下主菜单会带 `NGenericPopup` 模态挡住桥接动作，自动化脚本需用窗口模式启动。
+

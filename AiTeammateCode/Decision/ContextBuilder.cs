@@ -541,15 +541,22 @@ public class ContextBuilder
     private string BuildEnemyStateLine(CombatState state)
     {
         var enemyInfos = new List<string>();
-        foreach (var enemy in state.Enemies.Where(e => e.IsAlive))
+        // The [#n] prefix is the index inside CombatState.Enemies — the same number the bridge
+        // snapshot publishes and the number targets accept as "#n". It is the ONLY way to address
+        // one of two same-named enemies, so the prompt has to show it. 敌人行带索引，同名敌人只能靠它区分。
+        for (var i = 0; i < state.Enemies.Count; i++)
         {
+            var enemy = state.Enemies[i];
+            if (!enemy.IsAlive)
+                continue;
+
             var intent = enemy.Monster?.NextMove != null
                 ? FormatIntentCompact(enemy.Monster.NextMove, enemy)
                 : "未知";
             // Armor decides whether an attack actually lands, so it belongs next to the HP.
             // 敌人的护甲和状态都要给，不能只给玩家。
             var powers = FormatEnemyPowers(enemy);
-            enemyInfos.Add($"{enemy.Name}({enemy.CurrentHp}/{enemy.MaxHp} 格挡{enemy.Block}) {intent}{powers}");
+            enemyInfos.Add($"[#{i}] {enemy.Name}({enemy.CurrentHp}/{enemy.MaxHp} 格挡{enemy.Block}) {intent}{powers}");
         }
         return enemyInfos.Count > 0 ? string.Join(" | ", enemyInfos) : "无存活敌人";
     }

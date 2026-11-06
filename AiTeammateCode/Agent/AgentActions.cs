@@ -538,13 +538,20 @@ internal static class AgentActions
         if (!combat.HasEnoughResourcesFor(card, out var reason))
             return Fail($"Not enough resources for [{card.Title ?? card.Id.Entry}]: {reason}");
 
-        var target = ResolveTarget(CombatManager.Instance.DebugOnlyGetState(), player,
-            StringArg(args, "target"), card);
+        var targetResolution = ResolveTarget(CombatManager.Instance.DebugOnlyGetState(), player,
+            StringArg(args, "target"), card.TargetType, defaultToSelf: false);
+        if (targetResolution.IsError)
+            return Fail(targetResolution.Error!);
+
+        var target = targetResolution.Creature;
 
         // CardModel.IsValidTarget only accepts a creature for AnyEnemy / AnyAlly; everything else
         // (Self, AllEnemies, ...) must be played with target: null, which is also what the hand UI does.
         if (!CardTargetsACreature(card))
             target = null;
+        else if (target == null)
+            return Fail("This card needs a target: pass an enemy name, \"#[n]\" (the index from "
+                        + "combat.enemies[].index) or a teammate name.");
 
         // Play it the way the hand UI does — CardModel.TryManualPlay enqueues a PlayCardAction,
         // which spends energy/stars and raises the normal "when you play a card" hooks.
@@ -557,7 +564,9 @@ internal static class AgentActions
             return Fail($"Cannot play [{card.Title ?? card.Id.Entry}] right now: {unplayable}{blocked}.");
         }
 
-        var targetText = target != null ? $" → {target.Name}" : "";
+        var targetText = target != null
+            ? $" → {CombatTargetResolver.Describe(CombatManager.Instance.DebugOnlyGetState(), target)}"
+            : "";
         return new AgentActionResult(true, $"Playing [{card.Title ?? card.Id.Entry}]{targetText}", 700);
     }
 
@@ -587,16 +596,25 @@ internal static class AgentActions
         if (!inCombat && potion.Usage != PotionUsage.AnyTime)
             return Fail($"[{PotionName(potion)}] can only be used in combat.");
 
-        var target = ResolveTarget(inCombat ? CombatManager.Instance.DebugOnlyGetState() : null, player,
-            StringArg(args, "target"), null);
+        var potionState = inCombat ? CombatManager.Instance.DebugOnlyGetState() : null;
+        var targetResolution = ResolveTarget(potionState, player, StringArg(args, "target"),
+            potion.TargetType, defaultToSelf: true);
+        if (targetResolution.IsError)
+            return Fail(targetResolution.Error!);
+
+        var target = targetResolution.Creature;
         if (target == null && potion.TargetType is TargetType.Self or TargetType.AnyPlayer)
             target = player.Creature;
+        if (target == null && potion.TargetType is TargetType.AnyEnemy or TargetType.AnyAlly)
+            return Fail("This potion needs a target: pass an enemy name or \"#[n]\".");
 
         var action = new UsePotionAction(potion, target, inCombat);
         RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(action);
         _ = AwaitPotionAsync(action, potion);
 
-        var targetText = target != null ? $" → {target.Name}" : "";
+        var targetText = target != null
+            ? $" → {CombatTargetResolver.Describe(potionState, target)}"
+            : "";
         return new AgentActionResult(true, $"Using potion [{PotionName(potion)}]{targetText}", 700);
     }
 
@@ -1402,32 +1420,36 @@ internal static class AgentActions
     private static string PotionName(PotionModel potion) =>
         PromptTextHelper.ResolveLocString(potion.Title, potion.Id.Entry);
 
-    private static Creature? ResolveTarget(CombatState? state, Player player, string query, CardModel? card)
+    /// <summary>
+    /// Target for the local-player action tools. A blank target keeps the UI defaults (first living
+    /// enemy for an attack card, self for self/AnyPlayer cards); an explicit one goes through the
+    /// shared resolver, so "#1", "名字#1", "名字(12/50)" and duplicate-name ambiguity behave exactly
+    /// like they do for the AI decision path. 本地动作与 AI 决策共用同一套目标解析。
+    /// </summary>
+    private static TargetResolution ResolveTarget(CombatState? state, Player player, string query,
+        TargetType targetType, bool defaultToSelf)
     {
-        var enemies = state?.Enemies ?? Array.Empty<Creature>();
+        var scope = targetType == TargetType.AnyEnemy ? TargetScope.Enemy
+            : targetType == TargetType.AnyAlly ? TargetScope.Ally
+            : TargetScope.Any;
 
         if (string.IsNullOrWhiteSpace(query))
         {
-            if (card?.TargetType == TargetType.AnyEnemy)
-                return enemies.FirstOrDefault(e => e.IsAlive);
-            if (card is { TargetType: TargetType.Self or TargetType.AnyPlayer or TargetType.AllAllies })
-                return player.Creature;
-            return null;
+            if (targetType == TargetType.AnyEnemy)
+            {
+                var first = state?.Enemies.FirstOrDefault(e => e.IsAlive);
+                return first != null
+                    ? TargetResolution.Ok(first, CombatTargetResolver.IndexOf(state, first))
+                    : TargetResolution.Fail("There is no living enemy to target.");
+            }
+            if (targetType == TargetType.AnyAlly)
+                return TargetResolution.None; // caller reports "needs a teammate"
+            if (defaultToSelf || targetType is TargetType.Self or TargetType.AnyPlayer or TargetType.AllAllies)
+                return TargetResolution.Ok(player.Creature);
+            return TargetResolution.None;
         }
 
-        query = query.Trim();
-        if (query is "self" or "me" or "我" or "自己" or "你")
-            return player.Creature;
-
-        if (int.TryParse(query, out var index))
-            return index >= 0 && index < enemies.Count ? enemies[index] : null;
-
-        return enemies.FirstOrDefault(e =>
-            string.Equals(e.Name, query, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(e.Monster?.Id.Entry, query, StringComparison.OrdinalIgnoreCase))
-            ?? enemies.FirstOrDefault(e =>
-                (e.Name ?? "").Contains(query, StringComparison.OrdinalIgnoreCase)
-                || (e.Monster?.Id.Entry ?? "").Contains(query, StringComparison.OrdinalIgnoreCase));
+        return CombatTargetResolver.Resolve(state, player, query, scope);
     }
 
     private static string StringArg(JsonObject args, string name)

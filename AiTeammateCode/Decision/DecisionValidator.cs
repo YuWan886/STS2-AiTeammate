@@ -61,6 +61,13 @@ public class DecisionValidator
                     continue;
                 }
 
+                var targetCheck = ResolveTargetForCard(state, aiPlayer, card, action);
+                if (targetCheck.IsError)
+                {
+                    dropped?.Add($"{action.CardName}: {targetCheck.Error}");
+                    continue;
+                }
+
                 validActions.Add(action);
             }
 
@@ -73,9 +80,19 @@ public class DecisionValidator
                         || p.Id.Entry.Contains(action.PotionName, System.StringComparison.OrdinalIgnoreCase);
                 });
                 if (potion != null)
+                {
+                    var potionCheck = ResolveTargetForPotion(state, aiPlayer, potion, action);
+                    if (potionCheck.IsError)
+                    {
+                        dropped?.Add($"药水{action.PotionName}: {potionCheck.Error}");
+                        continue;
+                    }
                     validActions.Add(action);
+                }
                 else
+                {
                     dropped?.Add($"药水{action.PotionName}: 未找到");
+                }
             }
 
             if (action.Type is not ("play_card" or "use_potion" or "suggest_card" or "end_turn"))
@@ -88,11 +105,13 @@ public class DecisionValidator
         return validActions;
     }
 
-    public List<DecisionAction> ValidateDeferred(List<DecisionAction> deferred, Player aiPlayer)
+    public List<DecisionAction> ValidateDeferred(List<DecisionAction> deferred, Player aiPlayer,
+        List<string>? dropped = null)
     {
         // Validate deferred actions just like normal ones (they'll be checked again at play time)
         var combat = aiPlayer.PlayerCombatState;
-        if (combat == null) return new();
+        var state = CombatManager.Instance.DebugOnlyGetState();
+        if (combat == null || state == null) return new();
 
         var valid = new List<DecisionAction>();
         foreach (var action in deferred)
@@ -100,8 +119,23 @@ public class DecisionValidator
             if (string.IsNullOrWhiteSpace(action.CardName)) continue;
 
             var card = FindCardInHand(combat, action.CardName);
-            if (card == null) continue;
-            if (card.Keywords.Contains(CardKeyword.Unplayable)) continue;
+            if (card == null)
+            {
+                dropped?.Add($"{action.CardName}: 不在手牌（延迟动作）");
+                continue;
+            }
+            if (card.Keywords.Contains(CardKeyword.Unplayable))
+            {
+                dropped?.Add($"{action.CardName}: 不可打出（延迟动作）");
+                continue;
+            }
+
+            var targetCheck = ResolveTargetForCard(state, aiPlayer, card, action);
+            if (targetCheck.IsError)
+            {
+                dropped?.Add($"{action.CardName}: {targetCheck.Error}（延迟动作）");
+                continue;
+            }
 
             valid.Add(action);
         }
@@ -165,26 +199,33 @@ public class DecisionValidator
             var starCost = Math.Max(0, card.GetStarCostWithModifiers());
             if (cost > energy || starCost > stars) continue;
 
-            // Pick target: prefer lowest-HP alive enemy
-            string? target = null;
+            // Pick target: prefer the directive's focus target, else the lowest-HP alive enemy.
+            // The chosen creature is written as "#index" AND locked on the action, so the executor
+            // cannot re-resolve the name onto a same-named twin (the old code stored only the name,
+            // which is exactly how "planned the low-HP one, hit the high-HP one" happened).
+            Creature? targetEnemy = null;
             if (state != null)
             {
-                var aliveEnemies = state.Enemies.Where(e => e.IsAlive).ToList();
-                var targetEnemy = !string.IsNullOrWhiteSpace(preferredTargetName)
-                    ? aliveEnemies.FirstOrDefault(e => EnemyMatches(e, preferredTargetName))
-                    : null;
-                targetEnemy ??= aliveEnemies
+                if (!string.IsNullOrWhiteSpace(preferredTargetName))
+                {
+                    var preferred = CombatTargetResolver.Resolve(state, aiPlayer, preferredTargetName,
+                        TargetScope.Enemy);
+                    if (!preferred.IsError)
+                        targetEnemy = preferred.Creature;
+                }
+                targetEnemy ??= state.Enemies
+                    .Where(e => e.IsAlive)
                     .OrderBy(e => e.CurrentHp)
                     .FirstOrDefault();
-                if (targetEnemy != null)
-                    target = targetEnemy.Name ?? targetEnemy.Monster?.Id.Entry;
             }
 
+            var targetIndex = CombatTargetResolver.IndexOf(state, targetEnemy);
             actions.Add(new DecisionAction
             {
                 Type = "play_card",
                 CardName = card.Title ?? card.Id.Entry,
-                Target = target ?? ""
+                Target = targetIndex >= 0 ? $"#{targetIndex}" : "",
+                ResolvedTarget = targetEnemy
             });
             energy -= cost;
             stars -= starCost;
@@ -245,13 +286,64 @@ public class DecisionValidator
         return actions;
     }
 
-    private static bool EnemyMatches(Creature enemy, string targetName)
+    /// <summary>
+    /// Resolves the target once, at validation time, and stores the creature on the action so the
+    /// executor plays exactly that instance (an enemy dying mid-pass shifts the enemy list, so
+    /// re-resolving the string later could land on a different creature).
+    /// 校验阶段锁定目标实例；解析失败直接丢弃动作（绝不交给 AutoPlay 去随机挑一个）。
+    /// </summary>
+    private static TargetResolution ResolveTargetForCard(CombatState state, Player aiPlayer, CardModel card,
+        DecisionAction action)
     {
-        var name = enemy.Name ?? "";
-        var id = enemy.Monster?.Id.Entry ?? "";
-        return name.Contains(targetName, StringComparison.OrdinalIgnoreCase)
-            || id.Contains(targetName, StringComparison.OrdinalIgnoreCase)
-            || targetName.Contains(name, StringComparison.OrdinalIgnoreCase)
-            || targetName.Contains(id, StringComparison.OrdinalIgnoreCase);
+        if (card.TargetType == TargetType.AnyEnemy)
+        {
+            var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Enemy);
+            if (!resolved.IsError)
+                action.ResolvedTarget = resolved.Creature;
+            return resolved;
+        }
+
+        if (card.TargetType == TargetType.AnyAlly)
+        {
+            var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Ally);
+            if (resolved.IsError)
+                return resolved;
+            if (resolved.Creature == null)
+                return TargetResolution.Fail("支援牌必须写队友名或 self");
+            action.ResolvedTarget = resolved.Creature;
+            return resolved;
+        }
+
+        // Self / AllEnemies / ... are played with target: null (the hand UI does the same).
+        action.ResolvedTarget = null;
+        return TargetResolution.None;
     }
+
+    private static TargetResolution ResolveTargetForPotion(CombatState state, Player aiPlayer, PotionModel potion,
+        DecisionAction action)
+    {
+        if (potion.TargetType == TargetType.AnyEnemy)
+        {
+            var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Enemy);
+            if (!resolved.IsError)
+                action.ResolvedTarget = resolved.Creature;
+            return resolved;
+        }
+
+        if (potion.TargetType == TargetType.AnyAlly)
+        {
+            var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Ally);
+            if (resolved.IsError)
+                return resolved;
+            if (resolved.Creature == null)
+                return TargetResolution.Fail("这瓶药水要指定队友");
+            action.ResolvedTarget = resolved.Creature;
+            return resolved;
+        }
+
+        // Self / AnyPlayer keep the old behaviour: the executor defaults Self potions to the AI itself.
+        action.ResolvedTarget = null;
+        return TargetResolution.None;
+    }
+
 }

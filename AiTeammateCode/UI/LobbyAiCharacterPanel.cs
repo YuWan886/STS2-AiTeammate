@@ -12,13 +12,6 @@ using AiTeammate.AiTeammateCode.Localization;
 
 namespace AiTeammate.AiTeammateCode.Ui;
 
-/// <summary>Which lobby screen the card is parked on (they have different free space).</summary>
-public enum LobbyAiScreenKind
-{
-    Daily,
-    Custom
-}
-
 /// <summary>
 /// Compact "AI teammate" card for the daily / custom multiplayer lobby screens.
 ///
@@ -40,14 +33,10 @@ public partial class LobbyAiCharacterPanel : PanelContainer
     /// <summary>Scene of the vanilla character button, reused so the picker looks native.</summary>
     internal const string CharacterButtonScenePath = "res://scenes/screens/char_select/char_select_button.tscn";
 
-    // Free-space anchors measured against the vanilla scenes (1920x1080 virtual canvas):
-    //  - daily_run_screen: the mod's chat panel covers x≈19..441 / y≈486..864, the remote player box
-    //    ends at y≈572 and the modifiers list starts at y≈696 on the left half → park at (457, 580).
-    //  - custom_run_screen: the top-left corner above the title text (text starts at x≈359) and
-    //    above the remote player box is empty → park at (24, 24).
-    // The card is a narrow vertical stack so it fits both gaps.
-    private static readonly Vector2 DailyPosition = new(457f, 580f);
-    private static readonly Vector2 CustomPosition = new(24f, 24f);
+    // Both lobby screens park the card in the same top-left corner (user request 2026-11-06): the
+    // centered title text starts at x≈359 on both screens and the mod's chat panel covers the
+    // bottom-left (x≈19..441 / y≈486..864), so the corner above/left of them is empty everywhere.
+    private static readonly Vector2 PanelPosition = new(24f, 24f);
 
     private const double RefreshIntervalSeconds = 0.25;
 
@@ -129,7 +118,7 @@ public partial class LobbyAiCharacterPanel : PanelContainer
     /// Adds the card to a lobby screen (idempotent: a reused screen keeps the one card). The
     /// accessor is polled because a hosted daily lobby only exists after the time-server fetch.
     /// </summary>
-    public static void Attach(NSubmenu screen, Func<StartRunLobby?> lobbyAccessor, LobbyAiScreenKind kind)
+    public static void Attach(NSubmenu screen, Func<StartRunLobby?> lobbyAccessor)
     {
         try
         {
@@ -144,7 +133,7 @@ public partial class LobbyAiCharacterPanel : PanelContainer
             var panel = new LobbyAiCharacterPanel
             {
                 _lobbyAccessor = lobbyAccessor,
-                Position = kind == LobbyAiScreenKind.Daily ? DailyPosition : CustomPosition,
+                Position = PanelPosition,
                 Visible = false
             };
 

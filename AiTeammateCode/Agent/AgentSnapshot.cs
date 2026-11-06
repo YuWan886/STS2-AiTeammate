@@ -604,6 +604,8 @@ internal static class AgentSnapshotBuilder
             enemiesJson.Add(new JsonObject
             {
                 ["index"] = enemyIndex,
+                // Same handle the decision target accepts ("#[n]"), so dsh can copy it verbatim.
+                ["label"] = $"{enemy.Name}[#{enemyIndex}]",
                 ["name"] = enemy.Name,
                 ["id"] = enemy.Monster?.Id.Entry ?? "",
                 ["hp"] = enemy.CurrentHp,
@@ -619,6 +621,15 @@ internal static class AgentSnapshotBuilder
         }
 
         ctx.Json["combat"] = combatJson;
+
+        // Two living enemies with the same display name cannot be told apart by name: say so, because
+        // the target validator drops an ambiguous name instead of guessing. 重名时提示用索引。
+        if (CombatTargetResolver.HasDuplicateAliveNames(state))
+        {
+            ctx.Notes.Add("This combat has two or more living enemies with the same name: address them with "
+                          + "target \"#[n]\" (combat.enemies[].index/label) or \"Name(hp/max)\"; a bare name "
+                          + "is dropped as ambiguous.");
+        }
     }
 
     private static void DetectMap(Context ctx, NMapScreen screen)

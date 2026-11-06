@@ -818,7 +818,7 @@ public class AiTeammateManager
                     : Validator.Validate(result.Actions, AiPlayer, dropped);
                 var validDeferred = result.IsFallback
                     ? new List<DecisionAction>()
-                    : Validator.ValidateDeferred(result.DeferredActions, AiPlayer);
+                    : Validator.ValidateDeferred(result.DeferredActions, AiPlayer, dropped);
                 RecordDecisionFeedback(result, dropped, validActions);
                 await CombatExecutor.Execute(validActions, validDeferred, AiPlayer, effectiveCt, endTurn: false);
 
@@ -935,9 +935,19 @@ public class AiTeammateManager
                 .Select(DescribeAgentAction)
                 .Where(text => text.Length > 0)
                 .ToList();
+
+            // Which exact creature each kept action locked in ("Card->Cultist[#1]" for enemies):
+            // without this dsh cannot tell whether it hit the twin it planned for.
+            var state = CombatManager.Instance.DebugOnlyGetState();
+            var resolved = validActions
+                .Where(action => action.ResolvedTarget != null)
+                .Select(action =>
+                    $"{action.CardName}->{CombatTargetResolver.Describe(state, action.ResolvedTarget)}")
+                .ToList();
+
             var valid = validActions.Count(action => action.Type is not "end_turn");
             AgentDecisionFeedback.Record(AgentDecisionBroker.LastResolvedId,
-                AgentDecisionBroker.LastResolvedKind, requested, dropped, valid);
+                AgentDecisionBroker.LastResolvedKind, requested, dropped, valid, resolved);
         }
         catch (Exception ex)
         {

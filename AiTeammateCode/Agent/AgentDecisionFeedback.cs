@@ -15,11 +15,12 @@ internal static class AgentDecisionFeedback
     private static string _kind = "";
     private static readonly List<string> Requested = new();
     private static readonly List<string> Dropped = new();
+    private static readonly List<string> Resolved = new();
     private static int _valid;
     private static DateTimeOffset _recordedAt = DateTimeOffset.UtcNow;
 
     public static void Record(string? id, string? kind, IEnumerable<string>? requested,
-        IEnumerable<string>? dropped, int valid)
+        IEnumerable<string>? dropped, int valid, IEnumerable<string>? resolved = null)
     {
         lock (Sync)
         {
@@ -31,6 +32,9 @@ internal static class AgentDecisionFeedback
             Dropped.Clear();
             if (dropped != null)
                 Dropped.AddRange(dropped);
+            Resolved.Clear();
+            if (resolved != null)
+                Resolved.AddRange(resolved);
             _valid = valid;
             _recordedAt = DateTimeOffset.UtcNow;
         }
@@ -49,6 +53,9 @@ internal static class AgentDecisionFeedback
             var dropped = new JsonArray();
             foreach (var item in Dropped)
                 dropped.Add(item);
+            var resolved = new JsonArray();
+            foreach (var item in Resolved)
+                resolved.Add(item);
 
             return new JsonObject
             {
@@ -56,6 +63,9 @@ internal static class AgentDecisionFeedback
                 ["kind"] = _kind,
                 ["requested"] = requested,
                 ["dropped"] = dropped,
+                // "Card->Name[#2]": the exact creature the plan locked in, so dsh can see whether the
+                // hit landed on the twin it meant. 解析到的具体实例，供 dsh 自检。
+                ["resolved"] = resolved,
                 ["valid"] = _valid,
                 // Informational only; AgentSnapshotBuilder strips it back out before hashing the
                 // token, so the countdown cannot make the token churn.
@@ -72,6 +82,7 @@ internal static class AgentDecisionFeedback
             _kind = "";
             Requested.Clear();
             Dropped.Clear();
+            Resolved.Clear();
             _valid = 0;
         }
     }
