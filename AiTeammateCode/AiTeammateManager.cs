@@ -411,7 +411,7 @@ public class AiTeammateManager
 
         var chars = GetAiCharacterOptions();
         if (chars.Count == 0) return null;
-        character ??= chars[0];
+        character ??= ResolvePreferredAiCharacter(chars) ?? chars[0];
 
         var hostPlayer = lobby.Players.FirstOrDefault();
         var aiLobbyPlayer = new LobbyPlayer
@@ -451,8 +451,53 @@ public class AiTeammateManager
                 var p = lobby.Players[i];
                 p.character = character;
                 lobby.Players[i] = p;
+                RememberAiCharacter(character);
                 return;
             }
+        }
+    }
+
+    /// <summary>
+    /// Character the AI teammate is added with when a lobby is created: the host's last pick, or
+    /// <c>null</c> when nothing was picked yet or the saved character is gone (mod removed).
+    /// </summary>
+    private static CharacterModel? ResolvePreferredAiCharacter(List<CharacterModel> options)
+    {
+        try
+        {
+            var id = AiSettingsStore.Current.AiLobbyCharacterId;
+            if (string.IsNullOrWhiteSpace(id))
+                return null;
+
+            return options.FirstOrDefault(c =>
+                !(c is RandomCharacter)
+                && string.Equals(c.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            // Missing store during startup: fall back to the caller's default character.
+            return null;
+        }
+    }
+
+    /// <summary>Persists the AI's lobby character so the next lobby reuses it.</summary>
+    private static void RememberAiCharacter(CharacterModel character)
+    {
+        try
+        {
+            if (character is RandomCharacter)
+                return;
+
+            var settings = AiSettingsStore.Current;
+            if (string.Equals(settings.AiLobbyCharacterId, character.Id.Entry, StringComparison.Ordinal))
+                return;
+
+            settings.AiLobbyCharacterId = character.Id.Entry;
+            AiSettingsStore.Save();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Lobby] could not persist the AI teammate character: {ex.Message}");
         }
     }
 

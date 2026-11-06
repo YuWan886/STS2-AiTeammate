@@ -263,9 +263,12 @@ TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
 |---|---|---|
 | `button` | 菜单/子菜单按钮、Embark/Back、角色选择的普通按钮 | `ForceClick()` / `BaseButton.Pressed` |
 | `character` | 角色选择头像（`NCharacterSelectButton`） | `Select()`，等价点选该角色 |
+| `ai_character` | 每日/自定义大厅 AI 角色面板里的头像（`id=ai:<charId>`，`label=AI 选 X`） | `Select()`，把 AI 队友换成该角色（面板随后关闭） |
 | `modifier` | 自定模式词条勾选框（`NTickbox`） | 切换勾选 |
 | `ai_join` | 角色选择界面的「添加 AI 队友并准备」 | `AddAiToLobby` + `SetAiReady(true)` |
 | `ai_remove` | 移除大厅里的 AI 队友 | `RemoveAiFromLobby` |
+
+每日/自定义大厅没有原生角色选择器，模组在两个界面各挂一张「AI 队友」卡片：先按卡片的「更换角色」按钮，`ai_character` 选项才会出现（`ai_character` 与大厅自身的 `character` 分开，避免和自定模式自己的角色头像撞 id）。选中的角色会写进 `AiSettings.AiLobbyCharacterId`，下次建大厅沿用。
 
 `options` 在每次动作时按当前界面重新枚举；越界会返回错误，dsh 重新 `sts2_state` 即可。主菜单根之外的界面不能用 `sts2_start_run` / `sts2_host` / `sts2_continue_run`（会提示先 `sts2_proceed`）。
 

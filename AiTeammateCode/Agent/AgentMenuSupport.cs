@@ -21,6 +21,7 @@ using MegaCrit.Sts2.Core.Timeline.Epochs;
 using AiTeammate.AiTeammateCode.Compat;
 using AiTeammate.AiTeammateCode.Localization;
 using AiTeammate.AiTeammateCode.Solo;
+using AiTeammate.AiTeammateCode.Ui;
 
 namespace AiTeammate.AiTeammateCode.Agent;
 
@@ -228,6 +229,8 @@ internal static class AgentMenuSupport
             {
                 case "character":
                     return PressCharacter(option, out detail);
+                case "ai_character":
+                    return PressAiCharacter(option, out detail);
                 case "modifier":
                     return PressModifier(option, out detail);
                 case "ai_join":
@@ -555,7 +558,9 @@ internal static class AgentMenuSupport
                 break;
             case "daily_lobby":
             case "custom_lobby":
-                capture.Notes.Add("Press a lobby button with sts2_choose index=<n>; leave the lobby with sts2_proceed.");
+                capture.Notes.Add("Press a lobby button with sts2_choose index=<n>; leave the lobby with sts2_proceed. "
+                                  + "The AI teammate is added and readied automatically; change its character with the "
+                                  + "panel's change-character button, then press one of the ai_character options.");
                 break;
             default:
                 capture.Notes.Add("Press a menu button with sts2_choose index=<n>; leave this screen with sts2_proceed.");
@@ -724,6 +729,22 @@ internal static class AgentMenuSupport
 
             var character = characterButton.Character;
             var characterId = character?.Id.Entry ?? "";
+
+            // The daily/custom lobby AI picker reuses the very same character buttons; tag them so
+            // the agent cannot confuse "this picks the AI's character" with the human's own pick
+            // (and so the option ids do not collide with the custom lobby's own buttons).
+            if (IsInsideAiPicker(characterButton))
+            {
+                return new AgentMenuOption
+                {
+                    Kind = "ai_character",
+                    Id = characterId.Length > 0 ? "ai:" + characterId : "ai:random",
+                    Label = AiLoc.T("lobbyai.option", "AI ← {Name}", ("Name", CharacterName(character))),
+                    Enabled = characterButton.IsEnabled && !characterButton.IsLocked,
+                    Node = characterButton
+                };
+            }
+
             return new AgentMenuOption
             {
                 Kind = "character",
@@ -802,6 +823,18 @@ internal static class AgentMenuSupport
         return null;
     }
 
+    /// <summary>True when a node lives inside the daily/custom lobby AI character picker overlay.</summary>
+    private static bool IsInsideAiPicker(Node node)
+    {
+        for (var parent = node.GetParent(); parent != null; parent = parent.GetParent())
+        {
+            if (string.Equals(parent.Name, LobbyAiCharacterPanel.PickerNodeName, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
     private static bool AddOption(List<AgentMenuOption> options, HashSet<string> seen, AgentMenuOption option)
     {
         if (options.Count >= MaxOptions)
@@ -826,6 +859,21 @@ internal static class AgentMenuSupport
 
         button.Select();
         detail = $"Selected character [{option.Label}].";
+        return true;
+    }
+
+    private static bool PressAiCharacter(AgentMenuOption option, out string detail)
+    {
+        if (option.Node is not NCharacterSelectButton button || !GodotObject.IsInstanceValid(button))
+        {
+            detail = "That AI character button is no longer available.";
+            return false;
+        }
+
+        // Select() routes through the picker's ICharacterSelectButtonDelegate, which applies the
+        // character to the AI lobby entry and closes the picker.
+        button.Select();
+        detail = $"Set the AI teammate's character to [{option.Label}].";
         return true;
     }
 

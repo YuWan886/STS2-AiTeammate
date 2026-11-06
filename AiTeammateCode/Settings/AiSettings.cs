@@ -230,6 +230,16 @@ public sealed class AiSettings
     /// <summary>Ascension level for a new AI solo climb; 0 = no ascension. 单人爬塔的进阶难度。</summary>
     public int SoloAscensionLevel { get; set; }
 
+    // ---- Lobby AI teammate ----
+
+    /// <summary>
+    /// Character id the AI teammate is added with in a lobby; empty = the first available
+    /// character. Written whenever the host picks a different character in a lobby, so the daily /
+    /// custom / standard screens all remember the last choice.
+    /// 大厅里给 AI 队友选过的角色，下次建大厅时沿用。
+    /// </summary>
+    public string AiLobbyCharacterId { get; set; } = "";
+
     // ---- External agent bridge (dsh) ----
 
     /// <summary>Starts the local TCP bridge an external dsh plugin connects to. 启动外部 Agent 桥接。</summary>
@@ -368,6 +378,8 @@ public sealed class AiSettings
         EnableSoloClimb = defaults.EnableSoloClimb;
         SoloCharacterId = defaults.SoloCharacterId;
         SoloAscensionLevel = defaults.SoloAscensionLevel;
+
+        AiLobbyCharacterId = defaults.AiLobbyCharacterId;
 
         EnableAgentBridge = defaults.EnableAgentBridge;
         AgentBridgePort = defaults.AgentBridgePort;

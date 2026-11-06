@@ -3,7 +3,7 @@
   "name": "AI 队友",
   "author": "一条鱼丸_",
   "description": "多人模式中由 AI 操控的队友（独立人格、协作决策、聊天），支持单人「AI 独自爬塔」以及 B 站直播弹幕显示与 AI 弹幕互动。",
-  "version": "v2.4.2",
+  "version": "v2.4.3",
   "min_game_version": "0.107.1",
   "has_pck": true,
   "has_dll": true,
