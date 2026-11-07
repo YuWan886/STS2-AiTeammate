@@ -125,7 +125,7 @@ public class CombatDecisionExecutor
                 .Where(a => a.Type == "play_card" && !string.IsNullOrWhiteSpace(a.CardName))
                 .ToList();
 
-            if (AgentDecisionBroker.Enabled)
+            if (AiTeammateManager.Instance.ExternalBrainActive)
             {
                 // The external agent already reasoned about sequencing (apply Vulnerable first, draw
                 // before the payoff card, ...). Splitting the list into "all non-attacks, then all
@@ -183,7 +183,7 @@ public class CombatDecisionExecutor
             // Not when an external agent supplies the decisions: cards drawn mid-turn (by cards or
             // potions) must be seen by it, so the pass loop re-asks instead of spending the energy
             // on cards it never saw. The caller decides whether another decision pass is worth it.
-            if (!AgentDecisionBroker.Enabled
+            if (!AiTeammateManager.Instance.ExternalBrainActive
                 && !CombatManager.Instance.IsOverOrEnding
                 && (combat.Energy > 0 || combat.Stars > 0))
             {

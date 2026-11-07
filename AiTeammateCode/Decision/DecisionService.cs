@@ -1011,6 +1011,13 @@ public class DecisionResult
 
     public bool IsFallback { get; set; }
 
+    /// <summary>
+    /// true = 这份计划来自外部大脑(dsh)：按模型给的顺序出牌、跳过 Phase 3 的“清空剩余手牌”、
+    /// 每回合允许多轮决策。多人局里它必须随战斗计划一起广播（<see cref="Compat.AiCombatPlanCodec"/>），
+    /// 否则房主和客户端会用不同的执行模式播放同一份计划，AI 弃牌堆顺序随之分叉。
+    /// </summary>
+    public bool ExternalBrain { get; set; }
+
     public static DecisionResult Fallback()
     {
         return new DecisionResult

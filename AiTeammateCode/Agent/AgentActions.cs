@@ -636,8 +636,36 @@ internal static class AgentActions
             return Fail($"Potion '{query}' not found. Available: {available}");
         }
 
-        potion.Discard();
-        return new AgentActionResult(true, $"Discarded potion [{PotionName(potion)}]", 400);
+        // Discarding goes through the same GameAction the belt UI uses: calling potion.Discard()
+        // directly only changes the local copy and desyncs a multiplayer run.
+        var slot = PotionSlotOf(player, potion);
+        if (slot < 0)
+            return Fail($"Potion [{PotionName(potion)}] is no longer in a potion slot.");
+
+        try
+        {
+            RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
+                new DiscardPotionGameAction(player, (uint)slot, CombatManager.Instance.IsInProgress));
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Could not request potion discard: {ex.Message}");
+        }
+
+        return new AgentActionResult(true, $"Discard requested for potion [{PotionName(potion)}]", 500);
+    }
+
+    /// <summary>Belt slot of a potion instance (empty slots still count towards the index).</summary>
+    private static int PotionSlotOf(Player player, PotionModel potion)
+    {
+        var slots = player.PotionSlots;
+        for (var i = 0; i < slots.Count; i++)
+        {
+            if (ReferenceEquals(slots[i], potion))
+                return i;
+        }
+
+        return -1;
     }
 
     private static async Task AwaitPotionAsync(UsePotionAction action, PotionModel potion)
@@ -653,6 +681,14 @@ internal static class AgentActions
         }
     }
 
+    /// <summary>
+    /// Ends the local player's turn the way the End Turn button does — by requesting a synchronised
+    /// <see cref="EndPlayerTurnAction"/> through the action queue. Calling
+    /// <c>CombatManager.SetReadyToEndTurn</c> directly (the old implementation) only flips the local
+    /// ready flag: in multiplayer the host never learns the turn ended, so the client walks into
+    /// end-of-turn phase one alone and the very next checksum diverges (the host's later "undo end
+    /// turn" can no longer be applied on the client → <c>StateDivergence</c> kick).
+    /// </summary>
     private static AgentActionResult EndTurn(AgentSnapshot snap)
     {
         if (IsHandSelecting())
@@ -669,8 +705,26 @@ internal static class AgentActions
         if (state?.CurrentSide != CombatSide.Player)
             return Fail("It is not the player's turn.");
 
-        CombatManager.Instance.SetReadyToEndTurn(player, canBackOut: false);
-        return new AgentActionResult(true, "End turn signalled", 600);
+        // Already signalled (e.g. the model repeats the tool call): never send an undo by accident.
+        if (CombatManager.Instance.IsPlayerReadyToEndTurn(player))
+            return new AgentActionResult(true,
+                "End turn was already signalled; waiting for the other players.", 400);
+
+        if (player.PlayerCombatState is not { } combat)
+            return Fail("No combat state for the local player.");
+
+        try
+        {
+            RunManager.Instance.ActionQueueSynchronizer.RequestEnqueue(
+                new EndPlayerTurnAction(player, combat.TurnNumber));
+        }
+        catch (Exception ex)
+        {
+            return Fail($"Could not request end turn: {ex.Message}");
+        }
+
+        return new AgentActionResult(true,
+            $"End turn requested (turn {combat.TurnNumber}).", 700);
     }
 
     // ---- Screens ------------------------------------------------------------------------

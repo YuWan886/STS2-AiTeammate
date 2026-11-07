@@ -36,7 +36,8 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 
 内置 AI 的战斗执行器在打完计划牌之后还有一个 Phase 3：用启发式把手里剩下能打的牌全部打掉。对 dsh 来说这一步是错的——出牌、药水抽到的新牌它根本没看见，就被启发式花掉了。现在：
 
-- `controlled.kind=ai` 时 **Phase 3 关闭**（`CombatDecisionExecutor` 判 `AgentDecisionBroker.Enabled`）。每执行完一次决策，只要仍有能量/辉星且手牌里有能打出的牌，`ProcessCombatTurnAsync` 会**再挂一次决策**，prompt 里就是抽完牌之后的新手牌与新牌堆；单回合最多 6 次决策（内置后端仍是 3 次）。
+- `controlled.kind=ai` 时 **Phase 3 关闭**（`CombatDecisionExecutor` 判 `AiTeammateManager.ExternalBrainActive`）。每执行完一次决策，只要仍有能量/辉星且手牌里有能打出的牌，`ProcessCombatTurnAsync` 会**再挂一次决策**，prompt 里就是抽完牌之后的新手牌与新牌堆；单回合最多 6 次决策（内置后端仍是 3 次）。
+- **执行模式必须全房一致（v2.4.5 修复）**：`ExternalBrainActive` 不是本机开关。房主取本机 dsh 状态（`AgentDecisionBroker.Enabled`），客户端**跟随房主战斗计划里的 `externalBrain` 标记**（`DecisionResult.ExternalBrain` → `AiCombatPlanCodec` 的 `externalBrain` 字段），并按它调整单回合决策次数上限。2026-11-07 双人实测的掉线就是这么来的：房主（dsh 驱动）按模型原序出牌，客户端（没挂 dsh）走内置“先技能后攻击”分支，同一份计划在两端播放顺序不同，AI 弃牌堆顺序分叉 → `StateDivergence` 踢人。
 - 计划里显式返回 `{"type":"end_turn"}` 时立即停止追加决策（内置后端也尊重该动作，只是它的 Phase 3 已经先出完剩余牌）。
 - `ai_decision` / `ai_busy` 两种快照都带上了 `combat` 段（实时手牌、能量/辉星、敌人、牌堆张数）。执行期间（`ai_busy`）也可以用 `sts2_state` 直接看到抽到的牌；`options` 在 AI 模式下仍为空——出牌要用 `sts2_decide`，不用索引。
 - `combat.hand[].cost` 是**当前实际费用**（升级降费、临时费用修正都算进去，如「全身撞击+」= 0）；`upgraded` 表示是否已经升级。`card_reward` / `card_select` / `card_choice` 的 `detail` 末尾会跟一句「升级后: …」，未升级的卡可以直接比较升级收益。
@@ -380,8 +381,8 @@ export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
 | `sts2_abandon` | `{}` | 放弃当前局并返回主菜单（会删除当前存档）；只允许单人/主机，客户端会被拒绝 |
 | `sts2_play_card` | `{card, target?}` | 出牌；`card` 为手牌索引或卡名（`controlled.kind=local` 时可用）。走 `CardModel.TryManualPlay`＝手牌 UI 的同一条路（`PlayCardAction`），会正常扣能量/辉星并触发「打出一张牌」钩子；`CardCmd.AutoPlay` 是「免费打出」，不扣费，不能用于这里 |
 | `sts2_use_potion` | `{potion, target?}` | 用药水；`AnyTime` 药水在战斗外也能用 |
-| `sts2_discard_potion` | `{potion}` | **v2**：丢弃药水 |
-| `sts2_end_turn` | `{}` | 结束回合 |
+| `sts2_discard_potion` | `{potion}` | **v2**：丢弃药水。走联机的 `DiscardPotionGameAction`（与药水栏 UI 同一条路），不再直接改本地 `potion.Discard()`——后者在多人客户端只改本机，会跟主机分叉 |
+| `sts2_end_turn` | `{}` | 结束回合。走联机的 `EndPlayerTurnAction`（`ActionQueueSynchronizer.RequestEnqueue`，和结束回合按钮一致）；已经 ready 时只回报"等待其他玩家"，绝不反向撤销。**不要**直接调 `CombatManager.SetReadyToEndTurn`：那只会改本机的 ready 标记，多人客户端会在主机不知情的情况下独自进入回合结束阶段一，随后主机的"撤销结束回合"无法应用 → `StateDivergence` 掉线 |
 | `sts2_choose` | `{index, skip?}` | 地图/奖励/卡牌奖励/篝火/事件/商店/遗物/选包/水晶球/选目标；**v2.4** 也按下主菜单/大厅里的按钮、角色头像、自定词条勾选与 `ai_join` |
 | `sts2_select_cards` | `{indices}` | `NCardGridSelectionScreen` 家族多选 |
 | `sts2_proceed` | `{}` | 继续/离开/开箱/结束界面/确认选包/关闭水晶球；**v2.4** 也从当前菜单/大厅返回上一层 |

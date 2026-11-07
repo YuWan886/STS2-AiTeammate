@@ -301,6 +301,15 @@ public class AiTeammateManager
         AiLog.Log("SYSTEM", "AI 已释放本地玩家控制权");
     }
 
+    /// <summary>
+    /// 本回合是否按“外部大脑(dsh)”规则执行：按计划原序出牌、跳过 Phase 3 清空手牌、允许多轮决策。
+    /// 这是**全房统一**的执行模式：房主用本机 dsh 状态决定，客户端从房主的战斗计划里读取
+    /// （<see cref="DecisionResult.ExternalBrain"/>）。绝不能用本机 <c>AgentDecisionBroker.Enabled</c>
+    /// 判断——同一份计划两端播放顺序不同会让 AI 弃牌堆顺序分叉（2026-11-07 实测：NEUTRALIZE
+    /// 在房主端第一个进弃牌堆、在客户端被挪到最后，checksum 立刻不一致）。
+    /// </summary>
+    public bool ExternalBrainActive { get; private set; }
+
     public void ResetExtraPlayerTurnCombatDecisionState()
     {
         lock (_turnLock)
@@ -322,7 +331,7 @@ public class AiTeammateManager
 
         // The built-in executor only asks again when there is energy left; an external agent also
         // gets a pass for free / star-only hands, since it never auto-plays leftovers.
-        if (!AgentDecisionBroker.Enabled && combat.Energy <= 0)
+        if (!ExternalBrainActive && combat.Energy <= 0)
             return false;
 
         var state = CombatManager.Instance.DebugOnlyGetState();
@@ -621,6 +630,9 @@ public class AiTeammateManager
         if (AiMultiplayer.IsAuthority)
         {
             var own = await Task.Run(async () => await DecisionService.DecideCombatAsync(aiPlayer, ct), ct);
+            // The execution mode travels with the plan: followers must replay in the same order and
+            // skip the same phases, regardless of whether they have a dsh attached locally.
+            own.ExternalBrain = AgentDecisionBroker.Enabled;
             AiCombatPlanCodec.Publish(aiPlayer, decisionPass, own);
             return own;
         }
@@ -737,10 +749,17 @@ public class AiTeammateManager
             // timeout and card execution takes <5s. When dsh is driving the AI, a turn legitimately
             // takes minutes (the agent has to read the prompt and answer) and can now hold several
             // decision passes (one per mid-turn draw), so both the pass count and the net widen.
-            var maxDecisionPasses = AgentDecisionBroker.Enabled
+            // The execution mode must be identical on every peer (see ExternalBrainActive). The
+            // authority decides with the local dsh state; a follower adopts it from the host's plan
+            // below. Until that plan lands a follower assumes the generous setting, so a slow host
+            // is never cut short by the client's own (smaller) budget.
+            var syncedFollower = AiMultiplayer.RequiresDecisionSync && !AiMultiplayer.IsAuthority;
+            ExternalBrainActive = AgentDecisionBroker.Enabled || syncedFollower;
+
+            var maxDecisionPasses = ExternalBrainActive
                 ? MaxExternalAgentCombatDecisionPassesPerTurn
                 : MaxCombatDecisionPassesPerTurn;
-            var turnBudgetSeconds = AgentDecisionBroker.Enabled
+            var turnBudgetSeconds = ExternalBrainActive
                 ? 330 + ExternalAgentCombatTurnSecondsPerExtraPass * (maxDecisionPasses - 1)
                 : 45;
             using var hardTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(turnBudgetSeconds));
@@ -771,6 +790,18 @@ public class AiTeammateManager
                 // into each peer's local simulation (CardCmd.AutoPlay is never enqueued), so every
                 // peer must execute the exact same plan or the run diverges.
                 var result = await DecideCombatPlanAsync(decisionPass, effectiveCt);
+
+                // Followers replay the host's plan, so they must also replay the host's mode and
+                // pass budget — playing in plan order on one peer and "skills first" on the other
+                // is exactly how the AI's discard pile order diverged (StateDivergence kick).
+                if (syncedFollower && result.ExternalBrain != ExternalBrainActive)
+                {
+                    ExternalBrainActive = result.ExternalBrain;
+                    maxDecisionPasses = ExternalBrainActive
+                        ? MaxExternalAgentCombatDecisionPassesPerTurn
+                        : MaxCombatDecisionPassesPerTurn;
+                    AiLog.Log("COMBAT", $"跟随房主执行模式: {(ExternalBrainActive ? "外部大脑(原序)" : "内置(先技能后攻击)")}");
+                }
 
                 // Log the AI's decision
                 if (result.IsFallback)

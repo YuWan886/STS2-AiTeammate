@@ -15,6 +15,7 @@ internal static class AiCombatPlanCodec
     private sealed class PlanDto
     {
         public bool isFallback { get; set; }
+        public bool externalBrain { get; set; }
         public string thinking { get; set; } = "";
         public string chat { get; set; } = "";
         public List<DecisionAction> actions { get; set; } = new();
@@ -41,6 +42,7 @@ internal static class AiCombatPlanCodec
             var dto = new PlanDto
             {
                 isFallback = result.IsFallback,
+                externalBrain = result.ExternalBrain,
                 thinking = result.Thinking ?? "",
                 chat = result.ChatMessage ?? "",
                 actions = result.Actions ?? new List<DecisionAction>(),
@@ -70,6 +72,7 @@ internal static class AiCombatPlanCodec
             return new DecisionResult
             {
                 IsFallback = dto.isFallback,
+                ExternalBrain = dto.externalBrain,
                 Thinking = dto.thinking ?? "",
                 ChatMessage = dto.chat ?? "",
                 Actions = dto.actions ?? new List<DecisionAction>(),
