@@ -280,6 +280,12 @@ public sealed class AiToolRunner
                     : $"{card.Title}{upgraded}({costStr}{ContextBuilder.CardTypeTag(card.Type)}): {desc}";
             }
 
+            // The keyword / hover-tip sidebar (title + description) is the only place mod-added mechanics
+            // show up; the cached card text never carries it. 词缀侧边栏补进 card_info。
+            var tips = PromptTextHelper.GetHoverTipText(card, 240, line);
+            if (!string.IsNullOrWhiteSpace(tips))
+                line = $"{line} | 词缀/机制: {tips}";
+
             // An upgradable card that is not upgraded yet: say what the upgrade actually gives.
             var preview = _query.FormatUpgradePreview(card);
             return string.IsNullOrWhiteSpace(preview) ? line : line + "\n" + preview;

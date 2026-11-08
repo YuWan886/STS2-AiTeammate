@@ -1752,8 +1752,18 @@ internal static class AgentSnapshotBuilder
     internal static string SafeLoc(MegaCrit.Sts2.Core.Localization.LocString? loc, string fallback) =>
         PromptTextHelper.ResolveLocString(loc, fallback);
 
-    internal static string SafeCardDescription(CardModel card) =>
-        PromptTextHelper.CleanText(PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
+    /// <summary>
+    /// Card text plus the keyword / hover-tip sidebar. The sidebar is where mod-added mechanics live, so
+    /// leaving it out made modded cards look like blanks to the agent. 卡面 + 词缀侧边栏。
+    /// </summary>
+    internal static string SafeCardDescription(CardModel card)
+    {
+        var description = PromptTextHelper.CleanText(PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
+        var tips = PromptTextHelper.GetHoverTipText(card, 160, description);
+        if (string.IsNullOrWhiteSpace(tips))
+            return description;
+        return string.IsNullOrWhiteSpace(description) ? $"词缀/机制: {tips}" : $"{description} | 词缀/机制: {tips}";
+    }
 
     /// <summary>
     /// Card text plus, for a card that can still be upgraded, what the upgrade would give.

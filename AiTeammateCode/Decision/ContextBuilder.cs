@@ -1522,6 +1522,99 @@ public class ContextBuilder
         sb.AppendLine(FormatPile("主牌组", deck, PileType.Deck, MaxToolPileEntries, fullDetail: false, unknownOrder: false));
     }
 
+    // ---- Treasure relic ----
+
+    /// <summary>
+    /// Treasure-chest relic choice. The chest rolls one relic per player and every player votes on
+    /// that shared pool, so the candidate index here must match
+    /// <c>TreasureRoomRelicSynchronizer.CurrentRelics</c>. 宝箱遗物：候选是所有人共享的，索引即投票目标。
+    /// </summary>
+    public string BuildTreasureRelicContext(Player aiPlayer, IReadOnlyList<RelicModel> relics,
+        string? teammateVoteNote = null)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("[宝箱遗物]");
+        sb.Append(GetHpStatusLabel(aiPlayer));
+        AppendPlayerBrief(sb, aiPlayer);
+
+        try
+        {
+            var runState = aiPlayer.RunState;
+            if (runState != null)
+                sb.AppendLine($"当前: 第{runState.CurrentActIndex + 1}幕 第{runState.TotalFloor}层");
+        }
+        catch { }
+
+        var ownRelics = BuildRelicSummary(aiPlayer);
+        if (!string.IsNullOrWhiteSpace(ownRelics))
+            sb.AppendLine($"[已有遗物] {ownRelics}");
+        if (!string.IsNullOrWhiteSpace(teammateVoteNote))
+            sb.AppendLine(teammateVoteNote);
+
+        sb.AppendLine();
+        sb.AppendLine("可选遗物（索引=投票目标）：");
+        for (var i = 0; i < relics.Count; i++)
+            sb.AppendLine($"{i}. {DescribeRelicCandidate(relics[i])}");
+
+        AppendDeckList(sb, aiPlayer);
+        return sb.ToString();
+    }
+
+    /// <summary>One candidate line: 稀有度 + 名字 + 效果（缓存优先，取不到时读实时本地化文本）。</summary>
+    private string DescribeRelicCandidate(RelicModel? relic)
+    {
+        string id;
+        try { id = relic?.Id.Entry ?? ""; }
+        catch { id = ""; }
+
+        var cached = string.IsNullOrWhiteSpace(id) ? null : _query.GetRelicFull(id);
+        var name = cached?.Name ?? "";
+        var desc = cached?.Description ?? "";
+        var rarity = cached?.Tier ?? "";
+
+        // Live localization reads can throw on relics that belong to no pool (modded starters).
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(desc))
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                    name = SafeLocText(relic?.Title);
+                if (string.IsNullOrWhiteSpace(desc))
+                    desc = SafeLocText(relic?.DynamicDescription);
+            }
+            catch { }
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+            name = string.IsNullOrWhiteSpace(id) ? "?" : id;
+        desc = PromptTextHelper.Truncate(PromptTextHelper.CleanText(desc), 120);
+
+        var rarityText = RarityLabel(rarity);
+        if (string.IsNullOrEmpty(rarityText))
+            rarityText = RarityLabel(SafeRarity(relic));
+
+        var label = string.IsNullOrEmpty(rarityText) ? name : $"[{rarityText}] {name}";
+        return string.IsNullOrWhiteSpace(desc) ? label : $"{label} | 效果:{desc}";
+    }
+
+    private static string SafeRarity(RelicModel? relic)
+    {
+        try { return relic?.Rarity.ToString() ?? ""; }
+        catch { return ""; }
+    }
+
+    private static string RarityLabel(string? rarity) => (rarity ?? "").Trim() switch
+    {
+        "Starter" => "初始",
+        "Common" => "普通",
+        "Uncommon" => "罕见",
+        "Rare" => "稀有",
+        "Shop" => "商店",
+        "Event" => "事件",
+        "Ancient" => "远古",
+        _ => ""
+    };
+
     public string BuildEventContext(Player aiPlayer, List<string> optionDescs)
     {
         var sb = new StringBuilder();

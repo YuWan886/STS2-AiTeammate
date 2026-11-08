@@ -47,7 +47,11 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
 
 ### 1.3 手牌选择、运行控制与人格（v2.2）
 
-- dsh 接管本地玩家时，`CardSelectCmd.FromHand` / `FromHandForUpgrade` 不再打开原版手牌选择 UI（`NPlayerHand.SelectCards` 会一直等真人点击，dsh 无法完成；期间 `play_card` / `end_turn` 还会抢着执行，造成软锁与 ERROR 刷屏）。现在改为在 `AgentDecisionBroker` 挂一个 `kind=hand_select` 决策：`options=[{index, card, upgradable, detail}]`（prompt 里每张牌带费用、当前效果和「升级后」效果，`detail` 与之一致），dsh 用 `sts2_decide {"indices":[...], "reason":"..."}` 回答，模组照原有写法 `SyncLocalChoice` 交回；超时/未回答则启发式兜底，绝不把空选择交给游戏。
+- dsh 接管本地玩家时，`CardSelectCmd.FromHand` / `FromHandForUpgrade` 不再打开原版手牌选择 UI（`NPlayerHand.SelectCards` 会一直等真人点击，dsh 无法完成；期间 `play_card` / `end_turn` 还会抢着执行，造成软锁与 ERROR 刷屏）。现在改为在 `AgentDecisionBroker` 挂一个 `kind=hand_select` 决策：`options=[{index, card, upgradable, detail}]`（prompt 里每张牌带费用、当前效果、「升级后」效果和**词缀/悬停侧边栏**，`detail` 与之一致），决策对象额外带 `min_select` / `max_select` / `allow_empty`，dsh 用 `sts2_decide {"indices":[...], "reason":"..."}` 回答，模组照原有写法 `SyncLocalChoice` 交回；超时/未回答则启发式兜底，绝不把空选择交给游戏。
+  - **连着 ≠ 在驱动**：接管门槛是 `AgentDecisionBroker.AgentWatching`（`AgentFallbackSeconds` 窗口内有非被动请求）。只是挂着客户端、真人在自己打牌时不接管，否则武装（Armaments）会被静默启发式随机升级，`min=0` 的牌（Guards / Purity / Well Laid Plans / 赌徒系列）会直接按 0 张空过。
+  - **区间语义**：`min==max` 就是正好选这么多；`min<max` 时可少选（由游戏确认），`min==0` 时 `{"indices":[]}` = 「不选并确认」。模组只把少于 `min` 的结果补到 `min`，不再强行补到上限；启发式兜底也按真实区间取牌（`min=0` 的牌不再一律空过）。
+  - **AI 自己的选牌**：单人局里 dsh 是 AI 的大脑，AI 玩家的 `FromHand` 也挂决策交给 dsh；多人局不行——每个 peer 都在本地模拟 AI，`AgentDecisionBroker.Enabled` 是「本机」标志，让它决定 AI 拿哪张会撕开各端的牌堆（同 `externalBrain` 那条红线），所以多人局一律走确定性启发式。
+  - **词缀侧边栏**：`PromptTextHelper.GetHoverTipText` 读 `CardModel.HoverTips`（标题+说明），这是 mod 新增机制唯一存在的文本通道；只有**原版内容**的提示会按「卡面已经出现该词」去重，模组来源的提示（自定义能力/附魔/苦痛，`CanonicalModel` 不在 sts2.dll 里）一律保留——mod 卡面往往只写机制名字、解释只存在于侧边栏。<br>（历史：2026-11 修掉「接管判定只看『连上了』」和「区间被折叠成固定张数」两个 bug。）
 - `sts2_play_card` / `sts2_end_turn` 在 `NPlayerHand.IsInCardSelection` 为真时直接拒绝并提示先回答选牌决策。
 - 选目标：休息处 MEND（以及少数需要点选目标的药水/遗物）会打开原版 `NTargetManager` 的选目标模式并禁用底层按钮；桥接把这一状态识别为 `phase=target_select`，`options` 是可点的角色/生物（遵守 `NTargetManager` 自己的过滤，例如 MEND 不能选自己），最后一个索引是取消。`sts2_choose index=<n>` 会先 hover 该节点再完成选择，等价于鼠标点击；点取消则让原动作返回失败、休息处重新启用选项。
 - 运行控制工具：`sts2_pause` / `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon`。暂停菜单（capstone submenu）不在 overlay 栈里，快照单独识别为 `phase=paused`、不可行动。

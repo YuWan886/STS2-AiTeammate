@@ -1255,17 +1255,17 @@ public static class FromHandAiPatch
         await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
-            var pickCount = CardGridSelectionPatch.ResolveHandSelectionCount(cards.Count, prefs.MinSelect, prefs.MaxSelect);
             var selectionTag = CardGridSelectionPatch.DescribeHandSelectionSource(source, prefs, "FromHand");
-            var picked = pickCount == 0
-                ? new List<CardModel>()
-                : await DshHandSelect.AskAsync(player, cards, pickCount, selectionTag, CancellationToken.None);
+            var picked = await DshHandSelect.AskAsync(
+                player, cards, prefs.MinSelect, prefs.MaxSelect, selectionTag,
+                CancellationToken.None, parkForDsh: true);
 
             var names = picked.Count > 0
                 ? string.Join(", ", picked.Select(c => c.Title ?? c.Id.Entry))
                 : "(空)";
 
-            MainFile.Logger.Info($"[Agent] FromHand hand_select: [{names}] for {selectionTag} (pick={pickCount})");
+            MainFile.Logger.Info(
+                $"[Agent] FromHand hand_select: [{names}] for {selectionTag} (min={prefs.MinSelect} max={prefs.MaxSelect})");
             manager.AiLog.Log("AI_ACTION", $"手牌选牌(dsh): {names} | {selectionTag}");
 
             RunManager.Instance.PlayerChoiceSynchronizer.SyncLocalChoice(
@@ -1308,11 +1308,14 @@ public static class FromHandAiPatch
         await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
-            var pickCount = CardGridSelectionPatch.ResolveHandSelectionCount(cards.Count, prefs.MinSelect, prefs.MaxSelect);
             var selectionTag = CardGridSelectionPatch.DescribeHandSelectionSource(source, prefs, "FromHand");
-            var picked = pickCount == 0
-                ? new List<CardModel>()
-                : CardGridSelectionPatch.PickCardsByHeuristic(cards, pickCount, pickCount, selectionTag);
+            // dsh is the AI's brain in a singleplayer solo climb: let it answer the AI's own hand
+            // selections instead of silently resolving them with the heuristic. Multiplayer runs keep
+            // the deterministic heuristic on every peer (see DshHandSelect.AskAsync).
+            // 单人爬塔时 AI 自己的选牌也交给 dsh；多人局仍走启发式以保证各端一致。
+            var picked = await DshHandSelect.AskAsync(
+                player, cards, prefs.MinSelect, prefs.MaxSelect, selectionTag,
+                CancellationToken.None, parkForDsh: false);
 
             var names = picked.Count > 0
                 ? string.Join(", ", picked.Select(c => c.Title ?? c.Id.Entry))
@@ -1388,7 +1391,8 @@ public static class FromHandForUpgradeAiPatch
         {
             var sourceTag = source is CardModel sourceCard ? sourceCard.Id.Entry : "Upgrade";
             var picked = await DshHandSelect.AskAsync(
-                player, cards, 1, sourceTag, CancellationToken.None, "从中挑一张手牌升级");
+                player, cards, 1, 1, sourceTag, CancellationToken.None,
+                "从中挑一张手牌升级", parkForDsh: true);
             var selected = picked.FirstOrDefault();
             var selectedName = selected?.Title ?? selected?.Id.Entry ?? "(空)";
 
@@ -1430,7 +1434,9 @@ public static class FromHandForUpgradeAiPatch
         await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
-            var picked = CardGridSelectionPatch.PickCardsByHeuristic(cards, 1, 1, "Upgrade");
+            var picked = await DshHandSelect.AskAsync(
+                player, cards, 1, 1, "Upgrade", CancellationToken.None,
+                "从中挑一张手牌升级", parkForDsh: false);
             var selected = picked.FirstOrDefault();
             var selectedName = selected?.Title ?? selected?.Id.Entry ?? "(空)";
 
@@ -1466,6 +1472,13 @@ internal static class DshHandSelect
         if (!AgentDecisionBroker.Enabled)
             return false;
 
+        // Connected is not the same as driving. A bound dsh conversation that only sits in chat keeps
+        // the socket open; taking the hand-selection UI away from the human then resolves the card with
+        // a silent heuristic pick (or with zero cards) and no UI at all. Only take over while dsh keeps
+        // calling the bridge. 连着 ≠ 在驱动：真人自己打牌时不能把选牌界面吞掉。
+        if (!AgentDecisionBroker.AgentWatching)
+            return false;
+
         var manager = AiTeammateManager.Instance;
         if (manager == null || !manager.IsInitialized)
             return false;
@@ -1480,22 +1493,53 @@ internal static class DshHandSelect
     }
 
     /// <summary>
-    /// Parks a hand_select decision and returns the cards dsh picked (heuristic fallback when it
-    /// never answers). Always returns exactly <paramref name="pickCount"/> cards when possible.
+    /// Resolves one hand selection with the game's real <c>MinSelect/MaxSelect</c> semantics (any count in
+    /// the range may be confirmed, and 0 is legal when the minimum is 0 = "choose nothing and confirm").
+    /// When dsh owns the choice — a local takeover, or dsh being the AI player's brain — this parks a
+    /// <c>kind=hand_select</c> decision carrying that range plus every card's keyword / hover-tip sidebar
+    /// text; otherwise, and whenever nobody answers, it falls back to the heuristic.
+    /// 区间语义与词缀侧边栏都交给 dsh；没人应答才启发式兜底。
     /// </summary>
     public static async Task<List<CardModel>> AskAsync(
-        Player player, List<CardModel> cards, int pickCount, string selectionType,
-        CancellationToken ct, string? header = null)
+        Player player, List<CardModel> cards, int minSelect, int maxSelect,
+        string selectionType, CancellationToken ct, string? header = null, bool parkForDsh = true)
     {
-        if (cards.Count == 0 || pickCount <= 0)
+        if (cards.Count == 0)
             return new List<CardModel>();
+
+        // Clamp the game's own range to what the hand actually offers. MaxSelect can be a sentinel
+        // (Guards uses 999999999 = "any number"), so it never survives as a literal count.
+        var min = Math.Clamp(minSelect, 0, cards.Count);
+        var max = Math.Clamp(maxSelect <= 0 ? min : maxSelect, min, cards.Count);
+        if (max <= 0)
+            return new List<CardModel>();
+
+        // No dsh behind this call (built-in heuristic path): pass the real range on, so "up to N" picks
+        // up to N instead of collapsing to the minimum.
+        //
+        // Parking the AI player's own hand select for dsh is singleplayer-only on purpose: every peer
+        // simulates the AI locally, and AgentDecisionBroker.Enabled is a per-machine flag, so letting it
+        // decide which cards the AI takes would desync the peers' piles (same rule as the combat-plan
+        // externalBrain flag). In multiplayer the heuristic answers on every peer — deterministically.
+        // 多人局里 AI 的选牌必须各端一致，因此只有单人局才交给 dsh。
+        if (!parkForDsh && !(AgentDecisionBroker.Enabled && SingleplayerRun()))
+            return CardGridSelectionPatch.PickCardsByHeuristic(cards, min, max, selectionType);
 
         var options = new JsonArray();
         var prompt = new StringBuilder();
         prompt.AppendLine($"[手牌选择] 来源: {selectionType}");
         if (!string.IsNullOrWhiteSpace(header))
             prompt.AppendLine(header!);
-        prompt.AppendLine($"需要从下面的手牌中选择 {pickCount} 张（只能选这个列表里的牌）：");
+        prompt.AppendLine(min == max
+            ? $"从下面的手牌里选择正好 {min} 张（只能选列表里的牌）："
+            : $"从下面的手牌里选择 {min}~{max} 张（只能选列表里的牌）：");
+        prompt.AppendLine(min == 0
+            ? "- 最少 0 张：可以一张都不选，返回 {\"indices\":[]} 等于「不选并确认」，效果按没选任何牌结算。"
+            : $"- 最少 {min} 张，少于这个数游戏不接受。");
+        if (max > min)
+            prompt.AppendLine($"- 最多 {max} 张；只选 {min} 张也可以，你给出选择后由游戏确认（选够 {max} 张会自动确认）。");
+        prompt.AppendLine("- 本次决策只处理这一次选牌；同一次出牌若连续多次要求选牌，会依次出现新的决策。");
+
         var query = AiTeammateManager.Instance?.QueryService;
         for (var i = 0; i < cards.Count; i++)
         {
@@ -1505,25 +1549,34 @@ internal static class DshHandSelect
             // In-combat upgrade picks (Armaments, ...) are only worth making with the upgrade payoff
             // in view, so the prompt carries "current → upgraded" like the rest-site SMITH list.
             var preview = query?.FormatUpgradePreview(card, 80) ?? "";
+            // Keywords + the hover-tip sidebar. Mod mechanics live there and never show up in the card
+            // text, so without it dsh cannot judge modded cards. 词缀/新机制在悬停侧边栏里。
+            var tips = PromptTextHelper.GetHoverTipText(card, 140, current);
 
             var line = $"{i}: {card.Title ?? card.Id.Entry} ({ContextBuilder.FormatCostCompact(card)})";
             if (!string.IsNullOrWhiteSpace(current))
                 line += $" 当前: {PromptTextHelper.Truncate(current, 60)}";
             if (!string.IsNullOrWhiteSpace(preview))
                 line += $" | {preview}";
+            if (!string.IsNullOrWhiteSpace(tips))
+                line += $" | 词缀: {tips}";
             prompt.AppendLine(line);
+
+            var detail = string.IsNullOrWhiteSpace(preview)
+                ? PromptTextHelper.Truncate(current, 80)
+                : $"{PromptTextHelper.Truncate(current, 60)} | {preview}".Trim(' ', '|');
+            if (!string.IsNullOrWhiteSpace(tips))
+                detail = $"{detail} | 词缀: {tips}".Trim(' ', '|');
 
             options.Add(new JsonObject
             {
                 ["index"] = i,
                 ["card"] = card.Title ?? card.Id.Entry,
                 ["upgradable"] = card.IsUpgradable,
-                ["detail"] = string.IsNullOrWhiteSpace(preview)
-                    ? PromptTextHelper.Truncate(current, 80)
-                    : $"{PromptTextHelper.Truncate(current, 60)} | {preview}".Trim(' ', '|')
+                ["detail"] = PromptTextHelper.Truncate(detail, 240)
             });
         }
-        prompt.AppendLine("请以 JSON 返回：{\"indices\":[...], \"reason\":\"理由\"}");
+        prompt.AppendLine("请以 JSON 返回：{\"indices\":[...], \"reason\":\"理由\"}（indices 用上面的序号，可多选）");
 
         var systemPrompt = PersonalityPromptBuilder.BuildExternalAgentSystemPrompt(
             requireJson: true, includeTeamPrinciples: false);
@@ -1533,43 +1586,69 @@ internal static class DshHandSelect
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
-        var answer = await AgentDecisionBroker.RequestAsync(
-            player, "hand_select", systemPrompt, prompt.ToString(), linkedCts.Token, options);
-        var picked = ParseIndices(answer, cards.Count)
-            .Select(index => cards[index])
-            .ToList();
-
-        if (string.IsNullOrWhiteSpace(answer))
-            MainFile.Logger.Warn($"[Agent] hand_select not answered ({selectionType}); falling back to heuristic");
-
-        // Never hand the game an empty/partial selection: top up in heuristic order.
-        if (picked.Count < pickCount)
+        // The range is machine-readable too: a prompt-only statement is easy for a model to miss.
+        var extra = new JsonObject
         {
-            foreach (var candidate in CardGridSelectionPatch.PickCardsByHeuristic(
-                         cards, pickCount, pickCount, selectionType))
+            ["min_select"] = min,
+            ["max_select"] = max,
+            ["allow_empty"] = min == 0,
+            ["answer_shape"] = "{\"indices\":[...], \"reason\":\"...\"}"
+        };
+
+        var answer = await AgentDecisionBroker.RequestAsync(
+            player, "hand_select", systemPrompt, prompt.ToString(), linkedCts.Token, options, extra);
+
+        if (!TryParseIndices(answer, cards.Count, out var indices))
+        {
+            MainFile.Logger.Warn($"[Agent] hand_select not answered ({selectionType}); falling back to heuristic");
+            return CardGridSelectionPatch.PickCardsByHeuristic(cards, min, max, selectionType);
+        }
+
+        var picked = indices.Select(index => cards[index]).ToList();
+        if (picked.Count > max)
+            picked = picked.Take(max).ToList();
+
+        // Fewer than the game's minimum would be rejected by the game: top up to the minimum only.
+        if (picked.Count < min)
+        {
+            foreach (var candidate in CardGridSelectionPatch.PickCardsByHeuristic(cards, min, min, selectionType))
             {
                 if (picked.Contains(candidate)) continue;
                 picked.Add(candidate);
-                if (picked.Count >= pickCount) break;
+                if (picked.Count >= min) break;
             }
         }
 
-        return picked.Count > pickCount ? picked.Take(pickCount).ToList() : picked;
+        if (picked.Count == 0 && min == 0)
+            MainFile.Logger.Info($"[Agent] hand_select: dsh chose no card for {selectionType}");
+
+        return picked;
     }
 
-    /// <summary>Parses {"indices":[...]} (or a single {"index":n}); invalid entries are dropped.</summary>
-    private static List<int> ParseIndices(string? answer, int cardCount)
+    /// <summary>True in a plain singleplayer run (no peers to keep in sync).</summary>
+    private static bool SingleplayerRun()
     {
-        var indices = new List<int>();
+        try { return RunManager.Instance?.NetService?.Type == NetGameType.Singleplayer; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Parses {"indices":[...]} (or a single {"index":n}) into <paramref name="indices"/>. Returns false
+    /// when there was no usable answer at all, so the caller can tell "dsh said choose nothing" (a valid
+    /// answer when the minimum is 0) apart from "nobody answered".
+    /// </summary>
+    private static bool TryParseIndices(string? answer, int cardCount, out List<int> indices)
+    {
+        indices = new List<int>();
         if (string.IsNullOrWhiteSpace(answer))
-            return indices;
+            return false;
 
         try
         {
             using var doc = JsonDocument.Parse(ResponseParser.ExtractJson(answer));
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
-                return indices;
+                return false;
 
             if (root.TryGetProperty("indices", out var array) && array.ValueKind == JsonValueKind.Array)
             {
@@ -1580,20 +1659,25 @@ internal static class DshHandSelect
                         && !indices.Contains(index.Value))
                         indices.Add(index.Value);
                 }
+
+                return true;
             }
-            else if (root.TryGetProperty("index", out var single))
+
+            if (root.TryGetProperty("index", out var single))
             {
                 var index = ReadIndex(single);
                 if (index.HasValue && index.Value >= 0 && index.Value < cardCount)
                     indices.Add(index.Value);
+                return true;
             }
+
+            return false;
         }
         catch
         {
             // Malformed answer: the heuristic fallback takes over.
+            return false;
         }
-
-        return indices;
     }
 
     private static int? ReadIndex(JsonElement element)
@@ -1914,18 +1998,6 @@ public static class CardGridSelectionPatch
         }
     }
 
-    internal static int ResolveHandSelectionCount(int cardCount, int minSelect, int maxSelect)
-    {
-        if (cardCount <= 0 || maxSelect <= 0)
-            return 0;
-
-        var safeMax = Math.Min(cardCount, Math.Max(minSelect, maxSelect));
-        if (minSelect == maxSelect)
-            return safeMax;
-
-        return Math.Min(cardCount, Math.Max(0, minSelect));
-    }
-
     internal static string DescribeHandSelectionSource(AbstractModel? source, CardSelectorPrefs prefs, string fallback)
     {
         if (source is CardModel card)
@@ -2083,9 +2155,19 @@ public static class LoadRunPatch
 // so AnimateRelicAwards threw "Sequence contains no matching element" and the chest never finished
 // opening. Vote once the local collection has been initialized instead, and route the vote through
 // the action queue so multiplayer peers apply it too (an OnPicked call stays local to this machine).
+//
+// The pick itself is an AI decision now: one relic is taken as-is, several relics go through
+// DecisionService.DecideTreasureRelicAsync (LLM backend, or the parked dsh decision when it drives
+// the AI) and TreasureRelicHeuristic is the local fallback. It used to be `Random.Shared.Next`.
 [HarmonyPatch(typeof(NTreasureRoomRelicCollection), nameof(NTreasureRoomRelicCollection.InitializeRelics))]
 public static class TreasureRoomRelicAutoPickPatch
 {
+    /// <summary>
+    /// Cap for the built-in backend so a hung request cannot freeze the opened chest. With dsh as the
+    /// brain there is no extra cap — the broker owns the wait budget and its agent thinks longer.
+    /// </summary>
+    private const int DecisionDeadlineMs = 30000;
+
     [HarmonyPostfix]
     public static void AfterInitializeRelics()
     {
@@ -2105,14 +2187,170 @@ public static class TreasureRoomRelicAutoPickPatch
 
         // Already voted: singleplayer-with-fake-players pre-votes for non-local players, and a
         // second InitializeRelics for the same chest must not vote twice.
-        var existingVote = sync!.GetPlayerVote(aiPlayer);
-        if (existingVote != null && existingVote.voteReceived) return;
+        if (HasVoted(sync!, aiPlayer)) return;
 
-        var index = System.Random.Shared.Next(relics.Count);
-        var picked = relics[index];
+        // One relic (singleplayer, solo climb): nothing to decide, vote at once so the chest
+        // finishes without a model round trip.
+        if (relics.Count == 1)
+        {
+            Vote(manager, run, sync!, aiPlayer, 0, relics[0], 1, "");
+            return;
+        }
 
-        MainFile.Logger.Info($"AI auto-picking relic {index}/{relics.Count}: {picked.Id.Entry}");
-        manager.AiLog.Log("AI_ACTION", $"选择遗物: {picked.Id.Entry} ({relics.Count}选1, 随机)");
+        // Several relics: let the AI choose. Fire and forget — the chest waits for this vote and the
+        // request has to run out-of-band, but the game must not be held on this stack frame.
+        var candidates = relics.ToList();
+        _ = DecideAndVoteAsync(manager, run, sync!, aiPlayer, candidates);
+    }
+
+    private static bool HasVoted(TreasureRoomRelicSynchronizer sync, Player aiPlayer)
+    {
+        try
+        {
+            var vote = sync.GetPlayerVote(aiPlayer);
+            return vote is { voteReceived: true };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Teammates that already voted, for the decision prompt (contention/RPS awareness).</summary>
+    private static string? BuildTeammateVoteNote(
+        RunManager run, TreasureRoomRelicSynchronizer sync, Player aiPlayer)
+    {
+        try
+        {
+            var players = run.DebugOnlyGetState()?.Players;
+            if (players == null) return null;
+
+            var notes = new List<string>();
+            foreach (var player in players)
+            {
+                if (player == aiPlayer) continue;
+
+                var vote = sync.GetPlayerVote(player);
+                if (vote is not { voteReceived: true }) continue;
+
+                var name = player.Character?.Id.Entry ?? "队友";
+                notes.Add(vote.index is { } index ? $"{name} 已投 遗物#{index}" : $"{name} 已跳过");
+            }
+
+            return notes.Count == 0 ? null : $"队友投票: {string.Join("；", notes)}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task DecideAndVoteAsync(
+        AiTeammateManager manager,
+        RunManager run,
+        TreasureRoomRelicSynchronizer sync,
+        Player aiPlayer,
+        List<RelicModel> relics)
+    {
+        var count = relics.Count;
+        int index;
+        string reason;
+
+        try
+        {
+            // Solo climb: the human may have interrupted the AI (⏸ / chat). Hold like every other
+            // solo flow does; the chest simply waits for the resumed vote.
+            if (SoloRunController.IsActive)
+                await AiFlowControl.WaitWhilePausedAsync();
+
+            var note = BuildTeammateVoteNote(run, sync, aiPlayer);
+            var (choice, why) = await DecideWithDeadlineAsync(manager, aiPlayer, relics, note);
+
+            if (choice >= 0 && choice < count)
+            {
+                index = choice;
+                reason = why;
+            }
+            else
+            {
+                index = TreasureRelicHeuristic.Pick(aiPlayer, relics);
+                reason = string.IsNullOrWhiteSpace(why) ? "启发式兜底" : $"启发式兜底（{why}）";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            index = TreasureRelicHeuristic.Pick(aiPlayer, relics);
+            reason = "单人爬塔已暂停，启发式兜底";
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TreasureRelic] AI 遗物决策失败: {ex.Message}");
+            index = TreasureRelicHeuristic.Pick(aiPlayer, relics);
+            reason = "决策失败，启发式兜底";
+        }
+
+        if (index < 0 || index >= count)
+            index = 0;
+
+        try
+        {
+            // The chest may have resolved while we were asking (other vote / room left / run ended);
+            // a different chest could also have opened in the meantime, so match the candidates too.
+            MainThread.Run(() =>
+            {
+                var current = sync.CurrentRelics;
+                if (current == null || current.Count != count) return;
+                for (var i = 0; i < count; i++)
+                {
+                    if (!ReferenceEquals(current[i], relics[i])) return;
+                }
+                if (HasVoted(sync, aiPlayer)) return;
+                Vote(manager, run, sync, aiPlayer, index, relics[index], count, reason);
+            });
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TreasureRelic] 投票失败: {ex.Message}");
+        }
+    }
+
+    private static async Task<(int choice, string reason)> DecideWithDeadlineAsync(
+        AiTeammateManager manager,
+        Player aiPlayer,
+        List<RelicModel> relics,
+        string? teammateVoteNote)
+    {
+        var task = manager.DecisionService.DecideTreasureRelicAsync(
+            aiPlayer, relics, teammateVoteNote, CancellationToken.None);
+
+        if (AgentDecisionBroker.Enabled)
+            return await task;
+
+        var finished = await Task.WhenAny(task, Task.Delay(DecisionDeadlineMs));
+        if (finished == task)
+            return await task;
+
+        // The backend ignored its cancellation token; keep the fault observed.
+        _ = task.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        MainFile.Logger.Warn($"[TreasureRelic] AI 决策超过 {DecisionDeadlineMs}ms，改用启发式");
+        return (-1, "决策超时");
+    }
+
+    private static void Vote(
+        AiTeammateManager manager,
+        RunManager run,
+        TreasureRoomRelicSynchronizer sync,
+        Player aiPlayer,
+        int index,
+        RelicModel? relic,
+        int count,
+        string reason)
+    {
+        var name = relic?.Id.Entry ?? "?";
+        MainFile.Logger.Info($"[TreasureRelic] AI 选择遗物 {index}/{count}: {name} | {reason}");
+        manager.AiLog.Log("AI_ACTION", $"选择遗物: {name} ({count}选1, AI)");
+        if (!string.IsNullOrWhiteSpace(reason))
+            manager.AiLog.Log("AI_THINK", $"[宝箱遗物] {reason}");
 
         try
         {
@@ -2127,7 +2365,7 @@ public static class TreasureRoomRelicAutoPickPatch
                 run.ActionQueueSynchronizer.RequestEnqueue(new PickRelicAction(aiPlayer, index));
             }
         }
-        catch (System.Exception ex)
+        catch (Exception ex)
         {
             MainFile.Logger.Warn($"AI relic pick failed: {ex.Message}");
         }

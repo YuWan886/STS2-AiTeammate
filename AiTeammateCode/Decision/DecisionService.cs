@@ -439,7 +439,7 @@ public class DecisionService
         return sb.ToString().TrimEnd();
     }
 
-    private string BuildTaskPrompt(Player aiPlayer, string context, string instruction)
+    private string BuildTaskPrompt(Player aiPlayer, string context, string instruction, bool advertiseTools = true)
     {
         var sb = new StringBuilder();
         var prelude = BuildContextPrelude(aiPlayer);
@@ -454,7 +454,8 @@ public class DecisionService
 
         if (AgentDecisionBroker.Enabled)
             AppendExternalAgentTools(sb);
-        else if (AiSettingsStore.Current.EnableOutOfCombatReadTools || AiSettingsStore.Current.EnableScreenshotTool)
+        else if (advertiseTools
+                 && (AiSettingsStore.Current.EnableOutOfCombatReadTools || AiSettingsStore.Current.EnableScreenshotTool))
             AppendToolInstructions(sb, combat: false);
 
         return sb.ToString();
@@ -909,6 +910,71 @@ public class DecisionService
             var fallbackReason = ResponseParser.TryExtractReason(response.Content);
             var valid = fallbackChoice >= 0 && fallbackChoice < optionDescs.Count ? fallbackChoice : 0;
             return (valid, fallbackReason);
+        }
+    }
+
+    // ---- Treasure relic ----
+
+    /// <summary>
+    /// Treasure chest: every player votes on the same relic pool, so this is the AI's own vote (host
+    /// only — peers receive it as a <c>PickRelicAction</c>). Returns -1 when nothing usable came back
+    /// so the caller can apply its local fallback. Read tools are not advertised: the whole chest
+    /// context is already in the prompt, and the other players are waiting at the opened chest.
+    /// 宝箱遗物投票：候选题目已在提示词里，不再叠工具轮；失败返回 -1 交给本地兜底。
+    /// </summary>
+    public async Task<(int choice, string reason)> DecideTreasureRelicAsync(
+        Player aiPlayer,
+        IReadOnlyList<RelicModel> relics,
+        string? teammateVoteNote,
+        CancellationToken ct)
+    {
+        if (relics.Count == 0)
+            return (-1, "");
+
+        var instruction = new StringBuilder();
+        instruction.AppendLine($"请以 JSON 格式返回宝箱遗物选择：{{\"choice\":0~{relics.Count - 1}, \"reason\":\"理由\"}}");
+        instruction.AppendLine("宝箱遗物必须选一个，不能跳过。按自己角色的构筑、当前牌组和已有遗物评估哪个最有价值；");
+        instruction.AppendLine("这是给自己的遗物，不是团队分配：优先考虑自己能不能用得上。");
+        instruction.AppendLine("多人模式下所有玩家对同一组遗物投票：多人投同一个遗物时靠猜拳决定归属，输家拿剩下的遗物；");
+        instruction.AppendLine("若队友已经投了某个你很想要的遗物，可以权衡要不要改投自己第二想要、且没人抢的那个。");
+
+        // Build on the main thread: the prompt formats localized relic descriptions (SmartFormat
+        // pools are main-thread-only), mirroring DecideCombatAsync.
+        var userPrompt = MainThread.Invoke(() =>
+        {
+            var context = _contextBuilder.BuildTreasureRelicContext(aiPlayer, relics, teammateVoteNote);
+            return BuildTaskPrompt(aiPlayer, context, instruction.ToString().TrimEnd(), advertiseTools: false);
+        });
+
+        var response = await RequestWithToolsAsync(
+            aiPlayer,
+            BuildSystemPrompt(includeTeamPrinciples: false),
+            userPrompt,
+            256,
+            0.3f,
+            0,
+            MaxOutOfCombatToolTimeoutMs,
+            HasChoiceKey,
+            false,
+            ct,
+            kind: "treasure_relic");
+
+        if (!response.IsSuccess)
+            return (-1, "AI不可用");
+
+        try
+        {
+            var json = ResponseParser.ExtractJson(response.Content);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var choice = doc.RootElement.GetProperty("choice").GetInt32();
+            var reason = doc.RootElement.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "";
+            return (choice >= 0 && choice < relics.Count ? choice : -1, reason);
+        }
+        catch
+        {
+            var fallbackChoice = ResponseParser.TryExtractChoice(response.Content) ?? -1;
+            var fallbackReason = ResponseParser.TryExtractReason(response.Content);
+            return (fallbackChoice >= 0 && fallbackChoice < relics.Count ? fallbackChoice : -1, fallbackReason);
         }
     }
 

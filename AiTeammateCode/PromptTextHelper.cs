@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
@@ -70,6 +71,84 @@ internal static class PromptTextHelper
         if (card == null) return "";
 
         return OnMainThread(() => card.GetDescriptionForPile(pile) ?? "", "");
+    }
+
+    /// <summary>
+    /// The card's keyword / hover-tip sidebar as plain text ("标题: 说明；…"). The game renders this list
+    /// next to a hovered card, and it is the ONLY place mod-added mechanics appear: the card text only
+    /// prints the vanilla keyword words (Exhaust / Ethereal / ...) that
+    /// <see cref="CardModel.GetDescriptionForPile"/> injects. Tips whose title already shows up in
+    /// <paramref name="alreadyShown"/> (pass the description) are skipped so a normal prompt does not pay
+    /// for explaining "Exhaust" on every card.
+    /// 悬停侧边栏（词缀/新机制）的唯一文本来源；卡面描述里已有的不再重复。
+    /// </summary>
+    public static string GetHoverTipText(CardModel? card, int maxLen = 0, string? alreadyShown = null)
+    {
+        if (card == null) return "";
+
+        return OnMainThread(() =>
+        {
+            try
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var parts = new List<string>();
+                foreach (var tip in card.HoverTips)
+                {
+                    if (tip is not HoverTip hoverTip)
+                        continue;
+
+                    var title = CleanText(hoverTip.Title);
+                    var description = CleanText(hoverTip.Description);
+                    if (string.IsNullOrWhiteSpace(description))
+                        continue;
+
+                    // A tip is redundant when the card text already prints that very word ("消耗",
+                    // "格挡", "易伤") — but only for the game's own content. A mod card commonly just
+                    // NAMES its mechanic in the text while the explanation lives in the tip, so
+                    // mod-sourced tips are always kept. 卡面只写关键词名、不解释；模组提示一律保留。
+                    if (!string.IsNullOrWhiteSpace(title)
+                        && alreadyShown != null
+                        && IsVanillaSourced(hoverTip)
+                        && alreadyShown.Contains(title, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var line = string.IsNullOrWhiteSpace(title) ? description : $"{title}: {description}";
+                    if (!seen.Add(line))
+                        continue;
+
+                    parts.Add(line);
+                }
+
+                var text = string.Join("；", parts);
+                if (string.IsNullOrWhiteSpace(text))
+                    return "";
+                return maxLen > 0 ? Truncate(text, maxLen) : text;
+            }
+            catch
+            {
+                // A broken mod hover tip must never break the prompt.
+                return "";
+            }
+        }, "");
+    }
+
+    /// <summary>
+    /// True when a tip describes the game's own content (no canonical model = static / keyword tips, or a
+    /// model from the game assembly). Mod-sourced tips (custom powers, enchantments, afflictions) return
+    /// false so their explanation survives even when the card text already names the mechanic.
+    /// 提示是否来自原版内容；模组内容一律返回 false。
+    /// </summary>
+    private static bool IsVanillaSourced(HoverTip tip)
+    {
+        try
+        {
+            var model = tip.CanonicalModel;
+            return model == null || model.GetType().Assembly == typeof(CardModel).Assembly;
+        }
+        catch
+        {
+            return true;
+        }
     }
 
     /// <summary>

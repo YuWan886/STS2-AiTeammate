@@ -23,6 +23,8 @@ internal static class AgentDecisionBroker
 {
     private const int MaxWaitSeconds = 300;
     private const int WaitFloorSeconds = 60;
+    /// <summary>Window used by <see cref="AgentWatching"/> when the fallback setting is 0 (never fall back).</summary>
+    private const int DefaultSilenceWindowSeconds = 30;
     private const int PollMs = 500;
 
     private sealed class Pending
@@ -34,6 +36,8 @@ internal static class AgentDecisionBroker
         public string SystemPrompt = "";
         public string Prompt = "";
         public JsonArray? Options;
+        /// <summary>Extra machine-readable fields merged into the snapshot (e.g. a selection's min/max).</summary>
+        public JsonObject? Extra;
         public DateTimeOffset CreatedAt = DateTimeOffset.UtcNow;
         public readonly TaskCompletionSource<string?> Completion =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -61,6 +65,27 @@ internal static class AgentDecisionBroker
     /// 外部 Agent 正在接管 AI 的大脑。
     /// </summary>
     public static bool Enabled => AgentBridgeService.ExternalAgentDriving;
+
+    /// <summary>
+    /// True only while dsh is actually driving, not merely attached: a non-passive request reached the
+    /// bridge within the silence window. A bound conversation that is only sitting in chat keeps the
+    /// socket open, so <see cref="Enabled"/> alone must never be used to take UI away from the human.
+    /// 连着 ≠ 在驱动：只有 dsh 还在持续调用桥接时才算接管，判断该不该替 dsh 收掉真人 UI 必须用这个。
+    /// </summary>
+    public static bool AgentWatching
+    {
+        get
+        {
+            if (!Enabled)
+                return false;
+
+            var window = FallbackSeconds;
+            if (window <= 0)
+                window = DefaultSilenceWindowSeconds;
+
+            return AgentBridgeService.ClientIdleSeconds <= window;
+        }
+    }
 
     public static bool HasPending
     {
@@ -101,7 +126,7 @@ internal static class AgentDecisionBroker
             if (_pending == null)
                 return null;
 
-            return new JsonObject
+            var json = new JsonObject
             {
                 ["id"] = _pending.Id,
                 ["kind"] = _pending.Kind,
@@ -114,6 +139,19 @@ internal static class AgentDecisionBroker
                 ["options"] = _pending.Options?.DeepClone(),
                 ["answer_with"] = "sts2_decide {decision: <the JSON object the prompt asks for>}"
             };
+
+            // Extra fields (e.g. a hand selection's min/max) travel with the snapshot so a model does
+            // not have to infer them from prose. 选牌区间等附加字段随快照下发。
+            if (_pending.Extra != null)
+            {
+                foreach (var kv in _pending.Extra)
+                {
+                    if (!string.IsNullOrEmpty(kv.Key))
+                        json[kv.Key] = kv.Value?.DeepClone();
+                }
+            }
+
+            return json;
         }
     }
 
@@ -122,7 +160,7 @@ internal static class AgentDecisionBroker
     /// budget expires. Returns null when nothing usable arrived (callers fall back to their defaults).
     /// </summary>
     public static async Task<string?> RequestAsync(Player aiPlayer, string kind, string systemPrompt,
-        string prompt, CancellationToken ct, JsonArray? options = null)
+        string prompt, CancellationToken ct, JsonArray? options = null, JsonObject? extra = null)
     {
         if (!Enabled)
             return null;
@@ -157,7 +195,8 @@ internal static class AgentDecisionBroker
                 PlayerNetId = aiPlayer?.NetId ?? 0,
                 SystemPrompt = systemPrompt,
                 Prompt = prompt,
-                Options = options?.DeepClone() as JsonArray
+                Options = options?.DeepClone() as JsonArray,
+                Extra = extra?.DeepClone() as JsonObject
             };
             _pending = pending;
         }
