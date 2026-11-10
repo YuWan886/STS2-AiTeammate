@@ -73,6 +73,10 @@ public static class AiSettingsPage
 
     private static readonly ModSettingsValueBinding<AiSettings, int> DecisionTimeoutMs =
         B(s => s.DecisionTimeoutMs, (s, v) => s.DecisionTimeoutMs = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> NonCombatDecisionTimeoutMs =
+        B(s => s.NonCombatDecisionTimeoutMs, (s, v) => s.NonCombatDecisionTimeoutMs = v);
+    private static readonly ModSettingsValueBinding<AiSettings, int> CombatTurnBudgetSeconds =
+        B(s => s.CombatTurnBudgetSeconds, (s, v) => s.CombatTurnBudgetSeconds = v);
     private static readonly ModSettingsValueBinding<AiSettings, int> ChatTimeoutMs =
         B(s => s.ChatTimeoutMs, (s, v) => s.ChatTimeoutMs = v);
     private static readonly ModSettingsValueBinding<AiSettings, int> NonCombatRetryCount =
@@ -444,6 +448,14 @@ public static class AiSettingsPage
                 .AddIntSlider("decision_timeout", S("settings.decision.timeout", "Combat decision timeout (ms)"), DecisionTimeoutMs,
                     5000, 120000, 1000,
                     description: S("settings.decision.timeout.desc", "Maximum wait for a single combat decision."))
+                .AddIntSlider("non_combat_timeout", S("settings.decision.non_combat_timeout", "Out-of-combat decision limit (ms)"),
+                    NonCombatDecisionTimeoutMs, 5000, 180000, 1000,
+                    description: S("settings.decision.non_combat_timeout.desc",
+                        "Upper bound for one card reward / map / shop / rest site / treasure / event decision: the request timeout and the outer cap the room patches apply."))
+                .AddIntSlider("combat_turn_budget", S("settings.decision.combat_turn_budget", "Combat turn hard limit (s)"),
+                    CombatTurnBudgetSeconds, 15, 180, 5,
+                    description: S("settings.decision.combat_turn_budget.desc",
+                        "Hard cap for processing one combat turn with the built-in backend. The dsh bridge keeps its own, larger budget."))
                 .AddIntSlider("chat_timeout", S("settings.chat.timeout", "Chat timeout (ms)"), ChatTimeoutMs,
                     2000, 60000, 500,
                     description: S("settings.chat.timeout.desc", "Maximum wait for a chat request."))

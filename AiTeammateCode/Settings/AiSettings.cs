@@ -52,6 +52,21 @@ public sealed class AiSettings
     // ---- Decision ----
 
     public int DecisionTimeoutMs { get; set; } = 20000;
+
+    /// <summary>
+    /// Upper bound for one out-of-combat decision (card reward / map / shop / rest site / treasure /
+    /// event / card selection): used both as the single request timeout and as the outer cap the room
+    /// patches apply around the decision. 非战斗决策的上限时间（单次请求超时 + 房间补丁外层上限）。
+    /// </summary>
+    public int NonCombatDecisionTimeoutMs { get; set; } = 30000;
+
+    /// <summary>
+    /// Hard cap for processing one combat turn with the built-in backend. The dsh bridge keeps its own
+    /// (much larger) budget because an external agent legitimately thinks for minutes.
+    /// 内置后端单个战斗回合的硬上限。
+    /// </summary>
+    public int CombatTurnBudgetSeconds { get; set; } = 45;
+
     public int ChatTimeoutMs { get; set; } = 10000;
     public int NonCombatRetryCount { get; set; } = 2;
 
@@ -318,6 +333,8 @@ public sealed class AiSettings
         EnableModelThinking = defaults.EnableModelThinking;
 
         DecisionTimeoutMs = defaults.DecisionTimeoutMs;
+        NonCombatDecisionTimeoutMs = defaults.NonCombatDecisionTimeoutMs;
+        CombatTurnBudgetSeconds = defaults.CombatTurnBudgetSeconds;
         ChatTimeoutMs = defaults.ChatTimeoutMs;
         NonCombatRetryCount = defaults.NonCombatRetryCount;
         EnablePileDetail = defaults.EnablePileDetail;

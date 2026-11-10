@@ -54,7 +54,8 @@ public static class SoloRoomAutomation
                 RestSiteDecisionResult decision;
                 try
                 {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    using var cts = new CancellationTokenSource(
+                        TimeSpan.FromMilliseconds(DecisionService.OutOfCombatTimeoutMs));
                     decision = await manager.DecisionService.DecideRestSiteAsync(
                         aiPlayer, currentHp, maxHp, options, cts.Token);
                 }

@@ -31,7 +31,8 @@ public static class HextechRunesDecisionHandler
     private const string CodecTypeName = "HextechRunes.HextechChoiceCodec";
     private const string StableRandomTypeName = "HextechRunes.HextechStableRandom";
 
-    private const int LlmTimeoutSeconds = 25;
+    /// <summary>Bounded by the "out-of-combat decision limit" setting (default 30s).</summary>
+    private static int LlmTimeoutMs => DecisionService.OutOfCombatTimeoutMs;
 
     private static readonly object Gate = new();
     private static volatile bool _isAvailable;
@@ -250,12 +251,12 @@ public static class HextechRunesDecisionHandler
         string? saltSuffix)
     {
         var decideTask = DecideIndexAsync(aiPlayer, options, actIndex, choiceOrdinal, saltSuffix);
-        var deadline = Task.Delay(TimeSpan.FromSeconds(LlmTimeoutSeconds + 5));
+        var deadline = Task.Delay(TimeSpan.FromMilliseconds(LlmTimeoutMs + 5_000));
         if (await Task.WhenAny(decideTask, deadline) == decideTask)
             return await decideTask;
 
         _ = decideTask.ContinueWith(static t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
-        MainFile.Logger.Warn($"[HextechRunes] AI 决策超过 {LlmTimeoutSeconds + 5}s，改用稳定选择");
+        MainFile.Logger.Warn($"[HextechRunes] AI 决策超过 {(LlmTimeoutMs + 5_000) / 1000.0:F0}s，改用稳定选择");
         return PickDeterministic(aiPlayer, options, aiPlayer.RunState as RunState,
             actIndex, choiceOrdinal, saltSuffix);
     }
@@ -277,7 +278,7 @@ public static class HextechRunesDecisionHandler
             {
                 try
                 {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(LlmTimeoutSeconds));
+                    using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(LlmTimeoutMs));
                     var (choice, _, reason) = await manager.DecisionService.DecideHextechRuneAsync(
                         aiPlayer, options, null, cts.Token, allowReroll: false);
 

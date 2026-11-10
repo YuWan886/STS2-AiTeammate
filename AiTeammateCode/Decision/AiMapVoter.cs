@@ -13,7 +13,8 @@ namespace AiTeammate.AiTeammateCode.Decision;
 /// </summary>
 internal static class AiMapVoter
 {
-    private const int DecisionTimeoutSeconds = 25;
+    /// <summary>Bounded by the "out-of-combat decision limit" setting (default 30s).</summary>
+    private static int DecisionTimeoutMs => DecisionService.OutOfCombatTimeoutMs;
 
     private static readonly object Gate = new();
     private static int _busy;
@@ -90,7 +91,7 @@ internal static class AiMapVoter
             var manager = AiTeammateManager.Instance;
             if (points.Count > 0 && manager.IsInitialized && manager.DecisionService != null)
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(DecisionTimeoutSeconds));
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(DecisionTimeoutMs));
                 var descriptions = points.Select(ContextBuilder.DescribeMapPoint).ToList();
                 var (choice, why) = await manager.DecisionService.DecideMapNavigationAsync(aiPlayer, descriptions, cts.Token);
                 reason = why;

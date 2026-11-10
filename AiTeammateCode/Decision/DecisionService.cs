@@ -65,10 +65,11 @@ public class DecisionService
         List<AiMessage>? history = null,
         CancellationToken ct = default,
         int? timeoutOverrideMs = null,
-        string? imageDataUrl = null)
+        string? imageDataUrl = null,
+        int? baseTimeoutMs = null)
     {
         var settings = AiSettingsStore.Current;
-        var timeoutMs = Math.Clamp(timeoutOverrideMs ?? settings.DecisionTimeoutMs, 5000, 120000);
+        var timeoutMs = Math.Clamp(timeoutOverrideMs ?? baseTimeoutMs ?? settings.DecisionTimeoutMs, 5000, 180000);
         using var timeoutCts = new CancellationTokenSource(timeoutMs);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
         return await _backend.SendAsync(new AiRequest
@@ -96,7 +97,8 @@ public class DecisionService
         List<AiMessage>? history = null,
         CancellationToken ct = default,
         int? timeoutOverrideMs = null,
-        string? imageDataUrl = null)
+        string? imageDataUrl = null,
+        int? baseTimeoutMs = null)
     {
         int maxAttempts = Math.Clamp(AiSettingsStore.Current.NonCombatRetryCount, 0, 5) + 1; // 首次尝试 + 重试次数
         AiResponse? lastResponse = null;
@@ -111,7 +113,8 @@ public class DecisionService
             }
 
             lastResponse = await SendDecisionAsync(
-                systemPrompt, userPrompt, maxTokens, temp, history, ct, timeoutOverrideMs, imageDataUrl);
+                systemPrompt, userPrompt, maxTokens, temp, history, ct, timeoutOverrideMs, imageDataUrl,
+                baseTimeoutMs);
 
             if (lastResponse.IsSuccess)
                 return lastResponse;
@@ -184,16 +187,25 @@ public class DecisionService
         var prompt = firstPrompt;
         string? followUpImage = null;
 
+        // Combat keeps its own (settings) per-request timeout; every out-of-combat kind uses the
+        // configurable out-of-combat limit, which the room patches also use as their outer cap.
+        var baseTimeoutMs = string.Equals(kind, "combat", StringComparison.Ordinal)
+            ? CombatRequestTimeoutMs
+            : OutOfCombatTimeoutMs;
+
         for (var round = 0; ; round++)
         {
             var imageForThisRequest = followUpImage;
             followUpImage = null;
 
+            // A tool round may never outlive the decision's own limit.
+            var roundTimeoutMs = round > 0 ? Math.Min(toolRoundTimeoutMs, baseTimeoutMs) : (int?)null;
+
             var response = retryOnFailure
                 ? await SendNonCombatDecisionWithRetryAsync(systemPrompt, prompt, maxTokens, temp, history, ct,
-                    round > 0 ? toolRoundTimeoutMs : null, imageForThisRequest)
+                    roundTimeoutMs, imageForThisRequest, baseTimeoutMs)
                 : await SendDecisionAsync(systemPrompt, prompt, maxTokens, temp, history, ct,
-                    round > 0 ? toolRoundTimeoutMs : null, imageForThisRequest);
+                    roundTimeoutMs, imageForThisRequest, baseTimeoutMs);
 
             if (!response.IsSuccess)
                 return response;
@@ -274,6 +286,18 @@ public class DecisionService
 
     private const int MaxOutOfCombatToolRounds = 2;
     private const int MaxOutOfCombatToolTimeoutMs = 15000;
+
+    /// <summary>Base timeout for one combat decision request (setting, clamped). 战斗决策单次请求超时。</summary>
+    public static int CombatRequestTimeoutMs =>
+        Math.Clamp(AiSettingsStore.Current.DecisionTimeoutMs, 5000, 120000);
+
+    /// <summary>
+    /// Upper bound for one out-of-combat decision: the single request timeout <em>and</em> the outer cap
+    /// the room patches (rest site / treasure / follower sync) apply around it. Driven by the
+    /// "out-of-combat decision limit" setting. 非战斗决策上限时间：单次请求超时 + 房间补丁外层上限。
+    /// </summary>
+    public static int OutOfCombatTimeoutMs =>
+        Math.Clamp(AiSettingsStore.Current.NonCombatDecisionTimeoutMs, 5000, 180000);
 
     public void ResetCombatHistory(string? combatId = null)
     {

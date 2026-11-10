@@ -761,7 +761,7 @@ public class AiTeammateManager
                 : MaxCombatDecisionPassesPerTurn;
             var turnBudgetSeconds = ExternalBrainActive
                 ? 330 + ExternalAgentCombatTurnSecondsPerExtraPass * (maxDecisionPasses - 1)
-                : 45;
+                : Math.Clamp(AiSettingsStore.Current.CombatTurnBudgetSeconds, 15, 180);
             using var hardTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(turnBudgetSeconds));
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, hardTimeoutCts.Token);
             var effectiveCt = linkedCts.Token;

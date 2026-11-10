@@ -494,7 +494,8 @@ public static class RestSiteBeginPatch
             {
                 Compat.AiSyncBus.EnsureRegistered();
                 var payload = await Compat.AiSyncBus.AwaitAsync(
-                    Compat.AiSyncBus.KindChoice, restKey, TimeSpan.FromSeconds(20));
+                    Compat.AiSyncBus.KindChoice, restKey,
+                    TimeSpan.FromMilliseconds(DecisionService.OutOfCombatTimeoutMs + 5_000));
                 var dto = Compat.AiChoiceCodec.Deserialize(payload);
                 if (dto != null)
                 {
@@ -530,7 +531,8 @@ public static class RestSiteBeginPatch
             {
                 try
                 {
-                    using var cts = new CancellationTokenSource(5000); // 5s max for diagnostics
+                    using var cts = new CancellationTokenSource(
+                        TimeSpan.FromMilliseconds(DecisionService.OutOfCombatTimeoutMs));
                     decision = await manager.DecisionService.DecideRestSiteAsync(
                         aiPlayer, currentHp, maxHp, options, cts.Token);
                 }
@@ -1581,9 +1583,10 @@ internal static class DshHandSelect
         var systemPrompt = PersonalityPromptBuilder.BuildExternalAgentSystemPrompt(
             requireJson: true, includeTeamPrinciples: false);
 
-        // The game's action queue is waiting on this choice: don't hold it for the broker's full
-        // 300s budget when dsh is attached but idle.
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        // The game's action queue is waiting on this choice: cap it with the out-of-combat decision
+        // limit instead of holding it for the broker's full 300s budget when dsh is attached but idle.
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(DecisionService.OutOfCombatTimeoutMs));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
         // The range is machine-readable too: a prompt-only statement is easy for a model to miss.
@@ -2163,10 +2166,11 @@ public static class LoadRunPatch
 public static class TreasureRoomRelicAutoPickPatch
 {
     /// <summary>
-    /// Cap for the built-in backend so a hung request cannot freeze the opened chest. With dsh as the
-    /// brain there is no extra cap — the broker owns the wait budget and its agent thinks longer.
+    /// Cap for the built-in backend so a hung request cannot freeze the opened chest; it follows the
+    /// "out-of-combat decision limit" setting. With dsh as the brain there is no extra cap — the broker
+    /// owns the wait budget and its agent thinks longer.
     /// </summary>
-    private const int DecisionDeadlineMs = 30000;
+    private static int DecisionDeadlineMs => DecisionService.OutOfCombatTimeoutMs;
 
     [HarmonyPostfix]
     public static void AfterInitializeRelics()

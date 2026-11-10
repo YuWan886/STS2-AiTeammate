@@ -203,8 +203,10 @@ internal static class CardBundleSelectionPatch
         var systemPrompt = PersonalityPromptBuilder.BuildExternalAgentSystemPrompt(
             requireJson: true, includeTeamPrinciples: false);
 
-        // The game's room flow is blocked on this screen: don't ride the broker's full budget.
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        // The game's room flow is blocked on this screen: cap it with the out-of-combat decision limit
+        // instead of riding the broker's full budget.
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(DecisionService.OutOfCombatTimeoutMs));
         return await AgentDecisionBroker.RequestAsync(
             aiPlayer, "bundle_select", systemPrompt, prompt, timeoutCts.Token, options);
     }
