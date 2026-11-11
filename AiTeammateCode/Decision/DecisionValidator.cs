@@ -81,6 +81,13 @@ public class DecisionValidator
                 });
                 if (potion != null)
                 {
+                    // PotionUsage.Automatic (Fairy in a Bottle) has no manual Use button in vanilla;
+                    // the AI must not drink it as a heal. 自动触发的药水不能手动喝。
+                    if (!PromptTextHelper.CanBeUsedManually(potion))
+                    {
+                        dropped?.Add($"药水{action.PotionName}: 只能自动触发，不能手动使用");
+                        continue;
+                    }
                     var potionCheck = ResolveTargetForPotion(state, aiPlayer, potion, action);
                     if (potionCheck.IsError)
                     {
@@ -341,7 +348,33 @@ public class DecisionValidator
             return resolved;
         }
 
-        // Self / AnyPlayer keep the old behaviour: the executor defaults Self potions to the AI itself.
+        if (potion.TargetType == TargetType.AnyPlayer)
+        {
+            // 0.111 potions are throwable at any player (self or a teammate), so the directive
+            // "给队友用药水" arrives here as action.Target. Empty target (or a self alias) means
+            // "drink it myself" — UsePotionAction already defaults a null target to the owner.
+            // Singleplayer has no teammate to throw at: never fail the potion over that.
+            if (string.IsNullOrWhiteSpace(action.Target) || state.Players.Count <= 1)
+            {
+                action.ResolvedTarget = null;
+                return TargetResolution.None;
+            }
+
+            var resolved = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Any);
+            if (resolved.IsError)
+                return resolved;
+            if (resolved.Creature == null || resolved.Creature == aiPlayer.Creature)
+            {
+                action.ResolvedTarget = null;
+                return TargetResolution.None;
+            }
+            if (!resolved.Creature.IsPlayer)
+                return TargetResolution.Fail("这瓶药水只能对玩家使用，不能对敌人使用");
+            action.ResolvedTarget = resolved.Creature;
+            return resolved;
+        }
+
+        // Self / AllEnemies / ... are used with target: null (the executor defaults them to the AI).
         action.ResolvedTarget = null;
         return TargetResolution.None;
     }

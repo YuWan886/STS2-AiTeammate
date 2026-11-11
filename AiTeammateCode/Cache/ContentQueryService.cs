@@ -352,6 +352,10 @@ public class ContentQueryService
         if (brief == null && full == null) return "";
 
         var desc = full?.Description ?? brief?.OneLiner ?? "";
-        return $"[药水] {full?.Name ?? brief?.Name} | 效果:{desc}";
+        if (string.IsNullOrWhiteSpace(desc))
+            return $"[药水] {full?.Name ?? brief?.Name}";
+        var target = PromptTextHelper.DescribePotionTarget(full?.TargetType);
+        var targetText = string.IsNullOrWhiteSpace(target) ? "" : $" | 目标:{target}";
+        return $"[药水] {full?.Name ?? brief?.Name}{targetText} | 效果:{desc}";
     }
 }

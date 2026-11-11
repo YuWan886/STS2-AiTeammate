@@ -307,10 +307,12 @@ public class ContextBuilder
             desc = desc.Trim();
             if (desc.Length > 80) desc = desc[..80] + "...";
 
-            if (string.IsNullOrEmpty(desc))
-                sb.AppendLine($"    {name}");
-            else
-                sb.AppendLine($"    {name} | 效果:{desc}");
+            // TargetType/Usage must be visible: 0.111 potions are nearly all AnyPlayer (target is a
+            // choice), and PotionUsage.Automatic potions cannot be used by hand at all.
+            var target = PromptTextHelper.DescribePotionTarget(potion);
+            var blocked = PromptTextHelper.CanBeUsedManually(potion) ? "" : " | 不可手动使用(自动触发)";
+            var effect = string.IsNullOrEmpty(desc) ? "" : $" | 效果:{desc}";
+            sb.AppendLine($"    {name}{effect} | 目标:{target}{blocked}");
         }
     }
 

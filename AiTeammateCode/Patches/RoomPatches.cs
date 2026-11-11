@@ -887,7 +887,101 @@ internal static class AiPlayerChoiceContextHelper
     }
 }
 
-// ---- Intercept FromSimpleGrid for AI (e.g. Cleanse) ----
+/// <summary>
+/// Whether beginning a player choice on <paramref name="context"/> can actually complete for the AI.
+/// The game builds hook contexts with <c>LocalContext.NetId</c> as their local id, and
+/// <c>HookPlayerChoiceContext.SignalPlayerChoiceBegun</c> only enqueues the hook action when the
+/// action owner *is* that local id. For an AI-owned hook action it never enqueues and then waits on
+/// <c>ExecutionStartedTask</c> forever — so an AI choice must not pause such a context at all. When it
+/// doesn't pause, there is nothing to resume either, and the selection resolves inline (all peers run
+/// the same deterministic heuristic, so the ordering stays identical).
+/// 0.111's <c>BranchingPlayerChoiceContext</c> has the same trap in a different shape: it hands a
+/// non-owning chooser a brand-new hook context whose local id is still the *local human's*, so
+/// "the human used a potion on the AI" cannot resume either. See the default arm below.
+/// </summary>
+internal static class AiChoiceContext
+{
+    public static bool CanSignalForAi(PlayerChoiceContext? context, ulong chooserNetId)
+    {
+        for (var depth = 0; context != null && depth < 4; depth++)
+        {
+            switch (context)
+            {
+                case GameActionPlayerChoiceContext:
+                case BlockingPlayerChoiceContext:
+                    return true;
+
+                case HookPlayerChoiceContext hook:
+                    return LocalIdOf(hook) is ulong localId && localId == chooserNetId;
+
+                default:
+                    // 0.111 wraps a potion's / card effect's OnUse in a BranchingPlayerChoiceContext. It
+                    // forwards to the wrapped context only while the chooser owns it; otherwise it
+                    // *creates* a HookPlayerChoiceContext(chooser, _localPlayerId), and that hook action
+                    // is only enqueued when chooser == _localPlayerId (PotionModel.OnUseWrapper passes
+                    // LocalContext.NetId). For "the human used a potion on the AI" that is the human, so
+                    // the created hook waits on ExecutionStartedTask forever as well — judge what
+                    // Branching would actually do, not just what it wraps. Compiled by name because the
+                    // type does not exist in the 0.107 variant.
+                    if (context.GetType().Name != "BranchingPlayerChoiceContext")
+                        return false;
+
+                    var originalOwner = AccessTools.Property(context.GetType(), "OwnerId")?.GetValue(context) as ulong?;
+                    if (!originalOwner.HasValue || originalOwner.Value == chooserNetId)
+                    {
+                        context = AccessTools.Field(context.GetType(), "_originalContext")?.GetValue(context)
+                            as PlayerChoiceContext;
+                        continue;
+                    }
+
+                    var branchLocalId = AccessTools.Field(context.GetType(), "_localPlayerId")?.GetValue(context) as ulong?;
+                    return branchLocalId.HasValue && branchLocalId.Value == chooserNetId;
+            }
+        }
+
+        return false;
+    }
+
+    private static ulong? LocalIdOf(HookPlayerChoiceContext hook)
+    {
+        var value = AccessTools.Field(typeof(HookPlayerChoiceContext), "_localPlayerId")?.GetValue(hook);
+        return value is ulong id ? id : null;
+    }
+}
+
+// ---- Fix (0.111): resume the queue for an AI-owned choice ----
+// 0.111 wraps a potion's OnUse in a BranchingPlayerChoiceContext (PotionModel.OnUseWrapper), so the
+// context that reaches CardSelectCmd.FromChooseACardScreen / FromHand is no longer the
+// GameActionPlayerChoiceContext that AiPlayerChoiceContextHelper matches on. Ending the choice then
+// falls through to the vanilla SignalPlayerChoiceEnded, which only asks the queue to resume when the
+// action owner is the LOCAL player (Action.OwnerId == LocalContext.NetId). An AI-owned action waits on
+// WaitForActionToResumeExecutingAfterPlayerChoice forever instead: the potion is already consumed
+// (RemoveBeforeUse), the action stays in GatheringPlayerChoice, and its queue never runs again —
+// Attack/Skill/Power/Colorless Potion, Ashwater, Gambler's Brew, Touch of Insanity, ... all soft-lock.
+// Ask for the resume ourselves whenever the paused action belongs to the AI player; human-owned actions
+// keep the vanilla behaviour untouched.
+[HarmonyPatch(typeof(GameActionPlayerChoiceContext), nameof(GameActionPlayerChoiceContext.SignalPlayerChoiceEnded))]
+public static class AiOwnedActionChoiceEndResumePatch
+{
+    [HarmonyPrefix]
+    public static void Prefix(GameActionPlayerChoiceContext __instance)
+    {
+        var manager = AiTeammateManager.Instance;
+        if (manager == null || !manager.IsInitialized || manager.AiPlayer == null) return;
+
+        var action = __instance.Action;
+        if (action == null || action.OwnerId != manager.AiPlayer.NetId) return;
+
+        // Vanilla already resumes when the paused action belongs to the local player (solo climb binds
+        // the local player as the AI), and asking twice would repeat the resume request.
+        if (LocalContext.NetId == action.OwnerId) return;
+
+        MainFile.Logger.Info($"[AI] 选牌结束，为 AI 自己的动作请求恢复: action#{action.Id?.ToString() ?? "?"}");
+        RunManager.Instance.ActionQueueSynchronizer.RequestResumeActionAfterPlayerChoice(action);
+    }
+}
+
+// ---- Intercept FromChooseACardScreen for AI (selection potions, Discovery, Quasar, ...) ----
 // Instead of letting the game create a card selection screen and then trying
 // to auto-pick it, intercept the call before the screen is ever created.
 [HarmonyPatch(typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd), "FromChooseACardScreen")]
@@ -921,24 +1015,37 @@ public static class FromChooseACardScreenAiPatch
 
         var cardList = cards.ToList();
         var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.None);
+        // Mirror vanilla's begin/end pair only when the context can actually resume for the AI: a paused
+        // choice that nobody resumes hangs the action queue (see AiChoiceContext).
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.None);
         try
         {
-            CardModel? selected = null;
+            CardModel? selected;
             if (cardList.Count == 1 && !canSkip)
             {
                 selected = cardList[0];
             }
             else
             {
-                selected = CardGridSelectionPatch
-                    .PickCardsByHeuristic(cardList, 1, 1, "FromChooseACardScreen")
-                    .FirstOrDefault();
+                // Selection potions (Attack/Skill/Power/Colorless Potion) and card generators
+                // (Discovery, Quasar, Splash, ...) hand the AI a card it keeps or plays. In a solo run
+                // dsh is the AI's brain, so it picks; multiplayer and unattached runs keep the
+                // deterministic best-card heuristic (every peer must pick the same card, so a
+                // per-machine flag may never decide it). 选牌药水/生成牌：单人局交给 dsh。
+                var picked = await DshHandSelect.AskAsync(
+                    player, cardList, canSkip ? 0 : 1, 1,
+                    "选牌药水/效果", CancellationToken.None,
+                    header: "这是一次「挑一张牌」的效果（选牌药水或卡牌生成），选中的牌会加入手牌或立刻打出。",
+                    parkForDsh: false, candidateNoun: "候选牌", pile: PileType.Hand, kind: "card_selection",
+                    heuristic: CardGridSelectionPatch.PickBestForGain);
+                selected = picked.FirstOrDefault();
             }
 
             var selectedName = selected?.Title ?? selected?.Id.Entry ?? "(跳过)";
-            MainFile.Logger.Info($"[AI] FromChooseACardScreen pick: [{selectedName}]");
-            manager.AiLog.Log("AI_ACTION", $"选牌: {selectedName} | 启发式");
+            MainFile.Logger.Info($"[AI] FromChooseACardScreen pick: [{selectedName}] canSkip={canSkip}");
+            manager.AiLog.Log("AI_ACTION", $"选牌: {selectedName} | {(cardList.Count == 1 && !canSkip ? "唯一候选" : "dsh/启发式")}");
 
             var index = selected == null ? -1 : cardList.IndexOf(selected);
             RunManager.Instance.PlayerChoiceSynchronizer.SyncLocalChoice(
@@ -950,7 +1057,8 @@ public static class FromChooseACardScreenAiPatch
         }
         finally
         {
-            await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
         }
     }
 }
@@ -966,22 +1074,56 @@ public static class FromSimpleGridAiPatch
         if (!manager.IsInitialized || manager.AiPlayer == null) return true;
         if (player.NetId != manager.AiPlayer.NetId) return true;
 
-        // Handle AI card selection directly — no screen needed
-        MainFile.Logger.Info($"[AI] Intercepting FromSimpleGrid for AI: {cardsIn.Count} cards, min={prefs.MinSelect} max={prefs.MaxSelect}");
-        var cards = cardsIn.ToList();
-        var picked = CardGridSelectionPatch.PickCardsByHeuristic(cards, prefs.MinSelect, prefs.MaxSelect, "FromSimpleGrid");
-        var names = string.Join(", ", picked.Select(c => c.Title ?? c.Id.Entry));
-        MainFile.Logger.Info($"[AI] FromSimpleGrid pick: [{names}]");
-        manager.AiLog.Log("AI_ACTION", $"选牌: {names} | 启发式");
-
-        // Sync the choice
-        var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        var indexes = picked.Select(c => cards.IndexOf(c)).ToList();
-        RunManager.Instance.PlayerChoiceSynchronizer.SyncLocalChoice(player, choiceId,
-            PlayerChoiceResult.FromIndexes(indexes));
-
-        __result = Task.FromResult((IEnumerable<CardModel>)picked);
+        __result = SelectSimpleGridForAiAsync(context, cardsIn, player, prefs, manager);
         return false; // skip original
+    }
+
+    private static async Task<IEnumerable<CardModel>> SelectSimpleGridForAiAsync(
+        PlayerChoiceContext context,
+        IReadOnlyList<CardModel> cardsIn,
+        Player player,
+        CardSelectorPrefs prefs,
+        AiTeammateManager manager)
+    {
+        if (CombatManager.Instance.IsEnding)
+            return Array.Empty<CardModel>();
+
+        var cards = cardsIn.ToList();
+        if (cards.Count == 0)
+            return cards;
+        // Same shortcut the vanilla command takes (no decision needed, no screen).
+        if (!prefs.RequireManualConfirmation && cards.Count <= prefs.MinSelect)
+            return cards;
+
+        MainFile.Logger.Info(
+            $"[AI] Intercepting FromSimpleGrid for AI: {cards.Count} cards, min={prefs.MinSelect} max={prefs.MaxSelect}");
+
+        // Vanilla signals the choice before showing the screen (PlayerChoiceOptions.None). Mirror the
+        // begin/end pair only when the context can actually resume for the AI — game-built hook
+        // contexts carry the local human's id and would wait forever for a hook action nobody enqueues.
+        var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.None);
+        try
+        {
+            var picked = CardGridSelectionPatch.PickCardsByHeuristic(
+                cards, prefs.MinSelect, prefs.MaxSelect, "FromSimpleGrid");
+            var names = string.Join(", ", picked.Select(c => c.Title ?? c.Id.Entry));
+            MainFile.Logger.Info($"[AI] FromSimpleGrid pick: [{names}]");
+            manager.AiLog.Log("AI_ACTION", $"选牌: {names} | 启发式");
+
+            var indexes = picked.Select(c => cards.IndexOf(c)).ToList();
+            RunManager.Instance.PlayerChoiceSynchronizer.SyncLocalChoice(
+                player, choiceId, PlayerChoiceResult.FromIndexes(indexes));
+
+            return picked;
+        }
+        finally
+        {
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+        }
     }
 }
 
@@ -1254,7 +1396,11 @@ public static class FromHandAiPatch
             return cards;
 
         var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
+        // A paused choice that nobody can resume hangs the action queue; only mirror
+        // vanilla's begin/end pair when this context can resume for the chooser.
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
             var selectionTag = CardGridSelectionPatch.DescribeHandSelectionSource(source, prefs, "FromHand");
@@ -1279,7 +1425,8 @@ public static class FromHandAiPatch
         }
         finally
         {
-            await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
         }
     }
 
@@ -1307,7 +1454,11 @@ public static class FromHandAiPatch
             return cards;
 
         var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
+        // A paused choice that nobody can resume hangs the action queue; only mirror
+        // vanilla's begin/end pair when this context can resume for the chooser.
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
             var selectionTag = CardGridSelectionPatch.DescribeHandSelectionSource(source, prefs, "FromHand");
@@ -1335,7 +1486,104 @@ public static class FromHandAiPatch
         }
         finally
         {
-            await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+        }
+    }
+}
+
+// ---- Intercept FromCombatPile for AI (draw/discard pile picks) ----
+// Droplet of Precognition and Liquid Memories pick a card out of a combat pile. 0.111 opens
+// NCombatPileCardSelectScreen for that, a screen the mod does not auto-pick, so an AI-owned potion
+// left the pick for the human on *every* peer (and paused solo AI as an "unhandled screen"). Resolve
+// it locally with the same one-card heuristic used for hand picks, before any screen exists.
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd), nameof(MegaCrit.Sts2.Core.Commands.CardSelectCmd.FromCombatPile),
+    new[] { typeof(PlayerChoiceContext), typeof(CardPile), typeof(Player), typeof(CardSelectorPrefs), typeof(Func<CardModel, bool>) })]
+public static class FromCombatPileAiPatch
+{
+    [HarmonyPrefix]
+    public static bool Prefix(
+        PlayerChoiceContext context,
+        CardPile pile,
+        Player player,
+        CardSelectorPrefs prefs,
+        Func<CardModel, bool>? filter,
+        ref Task<IEnumerable<CardModel>> __result)
+    {
+        var manager = AiTeammateManager.Instance;
+        if (!manager.IsInitialized || manager.AiPlayer == null) return true;
+        if (player.NetId != manager.AiPlayer.NetId) return true;
+
+        __result = SelectFromCombatPileForAiAsync(context, pile, player, prefs, filter, manager);
+        return false;
+    }
+
+    private static async Task<IEnumerable<CardModel>> SelectFromCombatPileForAiAsync(
+        PlayerChoiceContext context,
+        CardPile pile,
+        Player player,
+        CardSelectorPrefs prefs,
+        Func<CardModel, bool>? filter,
+        AiTeammateManager manager)
+    {
+        if (CombatManager.Instance.IsOverOrEnding)
+            return Array.Empty<CardModel>();
+
+        var cards = pile.Cards.Where(filter ?? (_ => true)).ToList();
+        if (cards.Count == 0)
+            return cards;
+
+        // Same shortcut the vanilla command takes: nothing to decide.
+        if (!prefs.RequireManualConfirmation && cards.Count <= prefs.MinSelect)
+            return cards;
+
+        var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
+        // Only pause when the context can resume for the AI (see AiChoiceContext): a paused choice
+        // that nobody resumes is worse than an inline resolution.
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.None);
+        try
+        {
+            var pileLabel = pile.Type switch
+            {
+                PileType.Draw => "抽牌堆的牌",
+                PileType.Discard => "弃牌堆的牌",
+                _ => "牌堆里的牌",
+            };
+            var promptText = "";
+            try { promptText = prefs.Prompt.GetFormattedText(); } catch { /* prompt text is optional */ }
+            var header = string.IsNullOrWhiteSpace(promptText)
+                ? $"从{pileLabel}里挑牌（选中的牌会按效果加入手牌 / 被消耗 / 被变化）。"
+                : $"{promptText}（从{pileLabel}里挑牌，选中的牌会按效果加入手牌 / 被消耗 / 被变化）";
+
+            // These effects hand the AI a card it keeps/plays, so pick the *best* one — the generic
+            // grid heuristic ranks removal candidates (worst card first) and must not be used here.
+            // In a solo run dsh is the AI's brain, so it picks; multiplayer and unattached runs keep
+            // the deterministic best-card heuristic. 牌堆选牌：单人局交给 dsh。
+            var picked = await DshHandSelect.AskAsync(
+                player, cards, prefs.MinSelect, prefs.MaxSelect,
+                $"{pile.Type} 牌堆选牌", CancellationToken.None,
+                header: header, parkForDsh: false, candidateNoun: pileLabel, pile: pile.Type,
+                kind: "card_selection", heuristic: CardGridSelectionPatch.PickBestForGain);
+
+            var names = picked.Count > 0
+                ? string.Join(", ", picked.Select(c => c.Title ?? c.Id.Entry))
+                : "(空)";
+            MainFile.Logger.Info($"[AI] FromCombatPile pick: [{names}] | {pile.Type} min={prefs.MinSelect} max={prefs.MaxSelect}");
+            manager.AiLog.Log("AI_ACTION", $"牌堆选牌: {names} | dsh/启发式");
+
+            RunManager.Instance.PlayerChoiceSynchronizer.SyncLocalChoice(
+                player,
+                choiceId,
+                PlayerChoiceResult.FromMutableCombatCards(picked));
+
+            return picked;
+        }
+        finally
+        {
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
         }
     }
 }
@@ -1388,7 +1636,11 @@ public static class FromHandForUpgradeAiPatch
             return cards.FirstOrDefault();
 
         var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
+        // A paused choice that nobody can resume hangs the action queue; only mirror
+        // vanilla's begin/end pair when this context can resume for the chooser.
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
             var sourceTag = source is CardModel sourceCard ? sourceCard.Id.Entry : "Upgrade";
@@ -1410,7 +1662,8 @@ public static class FromHandForUpgradeAiPatch
         }
         finally
         {
-            await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
         }
     }
 
@@ -1433,7 +1686,11 @@ public static class FromHandForUpgradeAiPatch
             return cards.FirstOrDefault();
 
         var choiceId = RunManager.Instance.PlayerChoiceSynchronizer.ReserveChoiceId(player);
-        await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
+        // A paused choice that nobody can resume hangs the action queue; only mirror
+        // vanilla's begin/end pair when this context can resume for the chooser.
+        var canPause = AiChoiceContext.CanSignalForAi(context, player.NetId);
+        if (canPause)
+            await Compat.GameCompat.SignalPlayerChoiceBegun(context, player, PlayerChoiceOptions.CancelPlayCardActions);
         try
         {
             var picked = await DshHandSelect.AskAsync(
@@ -1454,7 +1711,8 @@ public static class FromHandForUpgradeAiPatch
         }
         finally
         {
-            await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
+            if (canPause)
+                await AiPlayerChoiceContextHelper.EndChoiceAsync(context, player);
         }
     }
 }
@@ -1495,16 +1753,23 @@ internal static class DshHandSelect
     }
 
     /// <summary>
-    /// Resolves one hand selection with the game's real <c>MinSelect/MaxSelect</c> semantics (any count in
+    /// Resolves one card selection with the game's real <c>MinSelect/MaxSelect</c> semantics (any count in
     /// the range may be confirmed, and 0 is legal when the minimum is 0 = "choose nothing and confirm").
-    /// When dsh owns the choice — a local takeover, or dsh being the AI player's brain — this parks a
-    /// <c>kind=hand_select</c> decision carrying that range plus every card's keyword / hover-tip sidebar
-    /// text; otherwise, and whenever nobody answers, it falls back to the heuristic.
+    /// When dsh owns the choice — a local takeover, dsh being the AI player's brain in a solo run, or an
+    /// AI card choice in that same solo run — this parks a decision carrying that range plus every card's
+    /// keyword / hover-tip sidebar text; otherwise, and whenever nobody answers, it falls back to
+    /// <paramref name="heuristic"/> (removal-tuned by default, "best card" for potion / pile picks).
     /// 区间语义与词缀侧边栏都交给 dsh；没人应答才启发式兜底。
     /// </summary>
+    /// <param name="candidateNoun">What the candidate cards are ("手牌", "抽牌堆的牌", ...) — prompt only.</param>
+    /// <param name="pile">Pile the cards were read from, so the description text matches what the player sees.</param>
+    /// <param name="kind">Decision kind shown to dsh (<c>hand_select</c> for hands, <c>card_selection</c> otherwise).</param>
+    /// <param name="heuristic">Fallback ranking; defaults to the removal heuristic.</param>
     public static async Task<List<CardModel>> AskAsync(
         Player player, List<CardModel> cards, int minSelect, int maxSelect,
-        string selectionType, CancellationToken ct, string? header = null, bool parkForDsh = true)
+        string selectionType, CancellationToken ct, string? header = null, bool parkForDsh = true,
+        string candidateNoun = "手牌", PileType pile = PileType.Hand, string kind = "hand_select",
+        Func<List<CardModel>, int, int, List<CardModel>>? heuristic = null)
     {
         if (cards.Count == 0)
             return new List<CardModel>();
@@ -1516,25 +1781,30 @@ internal static class DshHandSelect
         if (max <= 0)
             return new List<CardModel>();
 
+        // Removal-tuned by default (hand picks); callers whose effect hands the AI a card it keeps or
+        // plays (potion picks, draw/discard pile picks) pass the "best card" ranking instead.
+        var fallback = heuristic
+            ?? ((list, pickMin, pickMax) => CardGridSelectionPatch.PickCardsByHeuristic(list, pickMin, pickMax, selectionType));
+
         // No dsh behind this call (built-in heuristic path): pass the real range on, so "up to N" picks
         // up to N instead of collapsing to the minimum.
         //
-        // Parking the AI player's own hand select for dsh is singleplayer-only on purpose: every peer
+        // Parking the AI player's own selection for dsh is singleplayer-only on purpose: every peer
         // simulates the AI locally, and AgentDecisionBroker.Enabled is a per-machine flag, so letting it
         // decide which cards the AI takes would desync the peers' piles (same rule as the combat-plan
         // externalBrain flag). In multiplayer the heuristic answers on every peer — deterministically.
         // 多人局里 AI 的选牌必须各端一致，因此只有单人局才交给 dsh。
         if (!parkForDsh && !(AgentDecisionBroker.Enabled && SingleplayerRun()))
-            return CardGridSelectionPatch.PickCardsByHeuristic(cards, min, max, selectionType);
+            return fallback(cards, min, max);
 
         var options = new JsonArray();
         var prompt = new StringBuilder();
-        prompt.AppendLine($"[手牌选择] 来源: {selectionType}");
+        prompt.AppendLine($"[选牌] 来源: {selectionType}");
         if (!string.IsNullOrWhiteSpace(header))
             prompt.AppendLine(header!);
         prompt.AppendLine(min == max
-            ? $"从下面的手牌里选择正好 {min} 张（只能选列表里的牌）："
-            : $"从下面的手牌里选择 {min}~{max} 张（只能选列表里的牌）：");
+            ? $"从下面的{candidateNoun}里选择正好 {min} 张（只能选列表里的牌）："
+            : $"从下面的{candidateNoun}里选择 {min}~{max} 张（只能选列表里的牌）：");
         prompt.AppendLine(min == 0
             ? "- 最少 0 张：可以一张都不选，返回 {\"indices\":[]} 等于「不选并确认」，效果按没选任何牌结算。"
             : $"- 最少 {min} 张，少于这个数游戏不接受。");
@@ -1547,10 +1817,11 @@ internal static class DshHandSelect
         {
             var card = cards[i];
             var current = PromptTextHelper.CleanText(
-                PromptTextHelper.GetCardDescriptionText(card, PileType.Hand));
+                PromptTextHelper.GetCardDescriptionText(card, pile));
             // In-combat upgrade picks (Armaments, ...) are only worth making with the upgrade payoff
-            // in view, so the prompt carries "current → upgraded" like the rest-site SMITH list.
-            var preview = query?.FormatUpgradePreview(card, 80) ?? "";
+            // in view, so the prompt carries "current → upgraded" like the rest-site SMITH list. Pile
+            // and potion picks never upgrade anything, so they skip it.
+            var preview = pile == PileType.Hand ? query?.FormatUpgradePreview(card, 80) ?? "" : "";
             // Keywords + the hover-tip sidebar. Mod mechanics live there and never show up in the card
             // text, so without it dsh cannot judge modded cards. 词缀/新机制在悬停侧边栏里。
             var tips = PromptTextHelper.GetHoverTipText(card, 140, current);
@@ -1599,12 +1870,12 @@ internal static class DshHandSelect
         };
 
         var answer = await AgentDecisionBroker.RequestAsync(
-            player, "hand_select", systemPrompt, prompt.ToString(), linkedCts.Token, options, extra);
+            player, kind, systemPrompt, prompt.ToString(), linkedCts.Token, options, extra);
 
         if (!TryParseIndices(answer, cards.Count, out var indices))
         {
-            MainFile.Logger.Warn($"[Agent] hand_select not answered ({selectionType}); falling back to heuristic");
-            return CardGridSelectionPatch.PickCardsByHeuristic(cards, min, max, selectionType);
+            MainFile.Logger.Warn($"[Agent] {kind} not answered ({selectionType}); falling back to heuristic");
+            return fallback(cards, min, max);
         }
 
         var picked = indices.Select(index => cards[index]).ToList();
@@ -1614,7 +1885,7 @@ internal static class DshHandSelect
         // Fewer than the game's minimum would be rejected by the game: top up to the minimum only.
         if (picked.Count < min)
         {
-            foreach (var candidate in CardGridSelectionPatch.PickCardsByHeuristic(cards, min, min, selectionType))
+            foreach (var candidate in fallback(cards, min, min))
             {
                 if (picked.Contains(candidate)) continue;
                 picked.Add(candidate);
@@ -1623,7 +1894,7 @@ internal static class DshHandSelect
         }
 
         if (picked.Count == 0 && min == 0)
-            MainFile.Logger.Info($"[Agent] hand_select: dsh chose no card for {selectionType}");
+            MainFile.Logger.Info($"[Agent] {kind}: dsh chose no card for {selectionType}");
 
         return picked;
     }
@@ -1929,6 +2200,47 @@ public static class CardGridSelectionPatch
             // Out-of-combat: use async LLM for smarter picks
             _ = DoIntelligentGridPickAsync(screen, manager, cards, minSelect, maxSelect);
         }
+    }
+
+    /// <summary>
+    /// "Pick one card to gain" heuristic (Attack/Skill/Power/Colorless Potion, draw/discard pile
+    /// picks, in-combat card generators): choose the strongest card instead of a weak one.
+    /// <see cref="PickCardsByHeuristic"/> ranks cards as *removal* candidates, so it returns the worst
+    /// card first and must not back effects that hand the AI a card it then keeps or plays.
+    /// </summary>
+    internal static List<CardModel> PickBestForGain(List<CardModel> cards, int minSelect, int maxSelect)
+    {
+        // maxSelect == 0 means "select nothing" (min 0), not "all".
+        int toPick = maxSelect <= 0 ? 0 : Math.Min(maxSelect, cards.Count);
+        if (toPick < minSelect) toPick = Math.Min(minSelect, cards.Count);
+        if (toPick <= 0) return new List<CardModel>();
+
+        return cards
+            .OrderByDescending(GainScore)
+            .Take(toPick)
+            .ToList();
+    }
+
+    private static int GainScore(CardModel card)
+    {
+        // Curses/statuses are never worth taking over a real card.
+        if (card.Type is CardType.Curse or CardType.Status or CardType.Quest)
+            return -1000;
+
+        int score = card.Rarity switch
+        {
+            CardRarity.Rare or CardRarity.Ancient => 400,
+            CardRarity.Event => 300,
+            CardRarity.Uncommon => 200,
+            CardRarity.Common or CardRarity.Token => 100,
+            CardRarity.Basic => 50,
+            _ => 0,
+        };
+
+        if (card.IsUpgraded) score += 60;
+        // Powers are permanent value; attacks/skills are one-shot.
+        if (card.Type == CardType.Power) score += 30;
+        return score;
     }
 
     /// <summary>

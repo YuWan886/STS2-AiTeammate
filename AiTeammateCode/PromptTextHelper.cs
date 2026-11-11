@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
@@ -324,5 +325,52 @@ internal static class PromptTextHelper
         });
 
         return result;
+    }
+
+    /// <summary>
+    /// 药水目标的可读描述。药水的 <c>TargetType</c> 决定它要不要目标，提示词必须带上：0.111 里
+    /// 几乎所有药水都是 <c>AnyPlayer</c>（可丢给自己或队友），模型不知道时要么漏目标要么乱给目标。
+    /// </summary>
+    public static string DescribePotionTarget(PotionModel potion)
+    {
+        return DescribePotionTarget(potion.TargetType);
+    }
+
+    /// <summary>枚举版本，缓存里存的字符串也走这一套。</summary>
+    public static string DescribePotionTarget(TargetType targetType)
+    {
+        return targetType switch
+        {
+            TargetType.Self => "自己",
+            TargetType.AnyEnemy => "敌方单体",
+            TargetType.AllEnemies => "全体敌人",
+            TargetType.RandomEnemy => "随机敌人",
+            TargetType.AnyPlayer => "任意玩家(自己或队友)",
+            TargetType.AnyAlly => "队友",
+            TargetType.AllAllies => "全体队友",
+            TargetType.Osty => "自己的 Osy",
+            TargetType.TargetedNoCreature => "非生物目标",
+            _ => "无",
+        };
+    }
+
+    /// <summary>缓存里存的是枚举名，转成同一套中文描述。</summary>
+    public static string DescribePotionTarget(string? targetType)
+    {
+        if (string.IsNullOrWhiteSpace(targetType))
+            return "";
+        return Enum.TryParse<TargetType>(targetType, ignoreCase: true, out var parsed)
+            ? DescribePotionTarget(parsed)
+            : targetType;
+    }
+
+    /// <summary>
+    /// <c>PotionUsage.Automatic</c> 的药水（如瓶中仙子）只能由游戏自动触发，原版药水面板会把 Use
+    /// 按钮禁用。AI 走的是 <c>UsePotionAction</c>，没有 UI 闸门，必须自己拦住，否则会把复活药水
+    /// 当治疗喝掉。
+    /// </summary>
+    public static bool CanBeUsedManually(PotionModel potion)
+    {
+        return potion.Usage is PotionUsage.CombatOnly or PotionUsage.AnyTime;
     }
 }

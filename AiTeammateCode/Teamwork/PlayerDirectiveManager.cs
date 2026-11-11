@@ -268,7 +268,7 @@ public sealed class PlayerDirectiveManager
             return null;
 
         return potionList
-            .Where(p => p.TargetType == TargetType.AnyPlayer)
+            .Where(p => p.TargetType == TargetType.AnyPlayer && PromptTextHelper.CanBeUsedManually(p))
             .Select(p => new
             {
                 Potion = p,

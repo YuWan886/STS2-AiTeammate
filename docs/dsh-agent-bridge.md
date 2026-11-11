@@ -51,6 +51,7 @@ v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通�
   - **连着 ≠ 在驱动**：接管门槛是 `AgentDecisionBroker.AgentWatching`（`AgentFallbackSeconds` 窗口内有非被动请求）。只是挂着客户端、真人在自己打牌时不接管，否则武装（Armaments）会被静默启发式随机升级，`min=0` 的牌（Guards / Purity / Well Laid Plans / 赌徒系列）会直接按 0 张空过。
   - **区间语义**：`min==max` 就是正好选这么多；`min<max` 时可少选（由游戏确认），`min==0` 时 `{"indices":[]}` = 「不选并确认」。模组只把少于 `min` 的结果补到 `min`，不再强行补到上限；启发式兜底也按真实区间取牌（`min=0` 的牌不再一律空过）。
   - **AI 自己的选牌**：单人局里 dsh 是 AI 的大脑，AI 玩家的 `FromHand` 也挂决策交给 dsh；多人局不行——每个 peer 都在本地模拟 AI，`AgentDecisionBroker.Enabled` 是「本机」标志，让它决定 AI 拿哪张会撕开各端的牌堆（同 `externalBrain` 那条红线），所以多人局一律走确定性启发式。
+  - **选牌药水 / 牌堆选牌同样交给 dsh**（单人局）：`FromChooseACardScreen`（Attack/Skill/Power/Colorless Potion、Discovery、Quasar、Splash…）和 `FromCombatPile`（Droplet of Precognition / Liquid Memories，以及 Cleanse、Headbutt、Tutor、Secret Weapon 这类抽/弃牌堆取牌）现在挂 `kind=card_selection` 决策，回答形状仍是 `{"indices":[...], "reason":"..."}`，`min_select` / `max_select` / `allow_empty` 照旧；牌面文本按候选牌所在的牌堆取值，`options[].detail` 同样带词缀侧边栏。Ashwater / Touch of Insanity / Gambler's Brew 走 `FromHand`（`FromHandForDiscard` 内部就是 `FromHand`），本来就已经是 dsh 决策。没人回答时回退 `PickBestForGain`（挑最强的牌，而不是选牌屏那套「挑最差的牌」启发式）；多人局不挂决策，各端跑同一个确定性启发式，理由同上。
   - **词缀侧边栏**：`PromptTextHelper.GetHoverTipText` 读 `CardModel.HoverTips`（标题+说明），这是 mod 新增机制唯一存在的文本通道；只有**原版内容**的提示会按「卡面已经出现该词」去重，模组来源的提示（自定义能力/附魔/苦痛，`CanonicalModel` 不在 sts2.dll 里）一律保留——mod 卡面往往只写机制名字、解释只存在于侧边栏。<br>（历史：2026-11 修掉「接管判定只看『连上了』」和「区间被折叠成固定张数」两个 bug。）
 - `sts2_play_card` / `sts2_end_turn` 在 `NPlayerHand.IsInCardSelection` 为真时直接拒绝并提示先回答选牌决策。
 - 选目标：休息处 MEND（以及少数需要点选目标的药水/遗物）会打开原版 `NTargetManager` 的选目标模式并禁用底层按钮；桥接把这一状态识别为 `phase=target_select`，`options` 是可点的角色/生物（遵守 `NTargetManager` 自己的过滤，例如 MEND 不能选自己），最后一个索引是取消。`sts2_choose index=<n>` 会先 hover 该节点再完成选择，等价于鼠标点击；点取消则让原动作返回失败、休息处重新启用选项。
@@ -233,7 +234,7 @@ TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
 | `char_select` | 角色选择大厅（单人角色选择或标准多人房的房主/客户端） | `choose`（角色头像、`ai_join`/`ai_remove`、Embark）、`proceed`（返回）；`menu.lobby` 给出玩家/就绪/`can_begin` |
 | `daily_lobby` | 每日大厅（`NDailyRunScreen`，含服务器时间加载期） | `choose`（Embark/Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` / `daily_time` |
 | `custom_lobby` | 自定模式大厅（`NCustomRunScreen`） | `choose`（角色、词条勾选、Embark、Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` |
-| `ai_decision` | 有决策挂在 `AgentDecisionBroker` 上（AI 玩家的决策，或本地玩家的 `kind=hand_select` 选牌） | `sts2_decide`（`decision` 里带 prompt/options 与期望 JSON）；`combat` 段是实时局面 |
+| `ai_decision` | 有决策挂在 `AgentDecisionBroker` 上（AI 玩家的决策，或本地玩家的 `kind=hand_select` 选牌，或单人局 AI 的 `kind=card_selection` 药水/牌堆选牌） | `sts2_decide`（`decision` 里带 prompt/options 与期望 JSON）；`combat` 段是实时局面 |
 | `ai_busy` | AI 正在执行上一条决策（出牌/结算房间） | 无；`sts2_wait` 等下一个决策，`sts2_state.combat` 可看实时手牌/抽到的牌 |
 | `paused` | 暂停菜单（capstone submenu）打开 | `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon` |
 | `combat` | `CombatManager.IsInProgress` | `play_card` / `use_potion` / `discard_potion` / `end_turn` |

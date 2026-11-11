@@ -438,6 +438,14 @@ public class CombatDecisionExecutor
             return false;
         }
 
+        // Automatic potions (Fairy in a Bottle) are triggered by the game, never by hand.
+        if (!PromptTextHelper.CanBeUsedManually(potion))
+        {
+            _log.Log("AI_ACTION",
+                $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: 只能自动触发，不能手动使用");
+            return false;
+        }
+
         // Target: the instance locked at validation time, else a fresh resolution. A potion that
         // needs an enemy never falls back to a random target (the old path passed null, and
         // UsePotionAction/AutoPlay picked one at random). 药水目标同样不允许随机。
@@ -466,6 +474,46 @@ public class CombatDecisionExecutor
                 return false;
             }
         }
+        else if (potion.TargetType == TargetType.AnyPlayer && state.Players.Count > 1)
+        {
+            // 0.111: AnyPlayer potions can be thrown at a teammate. Honour a locked target, else
+            // resolve the requested player; an empty target keeps UsePotionAction's self default.
+            // The directive fallback ("给队友用药水") reaches here without validation, so resolve
+            // again instead of trusting ResolvedTarget only.
+            Creature? playerTarget = null;
+            if (action.ResolvedTarget is { } lockedPlayer)
+            {
+                playerTarget = lockedPlayer;
+            }
+            else if (!string.IsNullOrWhiteSpace(action.Target))
+            {
+                var resolvedPlayer = CombatTargetResolver.Resolve(state, aiPlayer, action.Target, TargetScope.Any);
+                if (resolvedPlayer.IsError)
+                {
+                    _log.Log("AI_ACTION",
+                        $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: {resolvedPlayer.Error}");
+                    return false;
+                }
+                playerTarget = resolvedPlayer.Creature;
+            }
+
+            if (playerTarget != null && playerTarget != aiPlayer.Creature)
+            {
+                if (!playerTarget.IsPlayer)
+                {
+                    _log.Log("AI_ACTION",
+                        $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: 目标 {CombatTargetResolver.Describe(state, playerTarget)} 不是玩家");
+                    return false;
+                }
+                if (!playerTarget.IsAlive)
+                {
+                    _log.Log("AI_ACTION",
+                        $"跳过药水 [{PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}]: 目标 {CombatTargetResolver.Describe(state, playerTarget)} 已死亡");
+                    return false;
+                }
+                resolution = TargetResolution.Ok(playerTarget);
+            }
+        }
 
         var target = resolution.Creature;
 
@@ -486,12 +534,24 @@ public class CombatDecisionExecutor
         {
             var before = aiPlayer.Potions?.Count() ?? 0;
             _log.Log("AI_ACTION", "跟随房主使用药水，等待同步");
+            var consumed = false;
             for (int i = 0; i < 30; i++)
             {
                 await Task.Delay(100, ct);
                 var now = aiPlayer.Potions?.Count() ?? 0;
                 if (now < before)
+                {
+                    consumed = true;
                     break;
+                }
+            }
+            if (!consumed)
+            {
+                // The host's action never replicated (or was cancelled). Reporting success here used
+                // to clear the player's "use a potion on the teammate" directive as fulfilled.
+                _log.Log("AI_ACTION",
+                    $"跟随房主使用药水未生效（3s 内药水槽未变化）: {PromptTextHelper.ResolveLocString(potion.Title, action.PotionName)}");
+                return false;
             }
             return true;
         }

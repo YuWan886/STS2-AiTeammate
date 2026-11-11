@@ -1536,7 +1536,12 @@ internal static class AgentSnapshotBuilder
         var max = 1;
         try
         {
-            var prefs = AccessTools.Field(typeof(NCardGridSelectionScreen), "_prefs")?.GetValue(screen);
+            // 0.111 keeps _prefs on the derived screens (NDeckCardSelectScreen / NSimpleCardSelectScreen),
+            // not on NCardGridSelectionScreen itself, so walk the runtime type hierarchy.
+            object? prefs = null;
+            for (var type = screen.GetType(); type != null && prefs == null; type = type.BaseType)
+                prefs = AccessTools.Field(type, "_prefs")?.GetValue(screen);
+
             if (prefs != null)
             {
                 min = (int)(AccessTools.Property(prefs.GetType(), "MinSelect")?.GetValue(prefs) ?? 1);
