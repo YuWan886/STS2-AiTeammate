@@ -1,7 +1,17 @@
 using System.Collections;
 using System.Threading.Tasks;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
+using MegaCrit.Sts2.Core.Entities.RestSite;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Nodes;
+using MegaCrit.Sts2.Core.Nodes.Screens.CharacterSelect;
+using MegaCrit.Sts2.Core.Nodes.Screens.CustomRun;
+using MegaCrit.Sts2.Core.Nodes.Screens.DailyRun;
+using MegaCrit.Sts2.Core.Nodes.Screens.MainMenu;
+using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
@@ -145,5 +155,161 @@ internal static class GameCompat
 
         if (AccessTools.Field(type, "completionTaskSource")?.GetValue(playerRestSite) is TaskCompletionSource completion)
             completion.TrySetResult();
+    }
+
+    // ---- 0.113 shims -------------------------------------------------------------------
+
+    /// <summary>0.113 folded the custom-run game mode into the isCustom flag on the run/lobby.</summary>
+    public static GameMode CustomRunGameMode
+    {
+        get
+        {
+#if STS2_API_0_113_OR_LATER
+            return GameMode.Standard;
+#else
+            return GameMode.Custom;
+#endif
+        }
+    }
+
+    /// <summary>0.113 renamed <c>UndoReadyToEndTurn</c> to <c>TryUndoReadyToEndTurn</c>.</summary>
+    public static void UndoReadyToEndTurn(CombatManager combat, Player player)
+    {
+#if STS2_API_0_113_OR_LATER
+        combat.TryUndoReadyToEndTurn(player);
+#else
+        combat.UndoReadyToEndTurn(player);
+#endif
+    }
+
+    /// <summary>0.113 removed <c>SmithRestSiteOption.SmithCount</c>; a smith always upgrades exactly one card.</summary>
+    public static int SmithCount(SmithRestSiteOption option)
+    {
+#if STS2_API_0_113_OR_LATER
+        _ = option;
+        return 1;
+#else
+        return option.SmithCount;
+#endif
+    }
+
+    /// <summary>
+    /// 0.113 starts a singleplayer run from a <see cref="Player"/> (built here with the singleplayer net id) and
+    /// marks custom runs with an <c>isCustomGame</c> flag instead of a <c>GameMode.Custom</c>.
+    /// </summary>
+    public static Task StartNewSingleplayerRunAsync(NGame game, CharacterModel character,
+        IReadOnlyList<ActModel> acts, IReadOnlyList<ModifierModel> modifiers, string seed,
+        GameMode gameMode, bool isCustom, int ascensionLevel, DateTimeOffset? dailyTime)
+    {
+#if STS2_API_0_113_OR_LATER
+        var player = Player.CreateForNewRun(character,
+            SaveManager.Instance.GenerateUnlockStateFromProgress(), SingleplayerNetId);
+        return game.StartNewSingleplayerRun(player, shouldSave: true, acts, modifiers, seed, gameMode,
+            isCustomGame: isCustom, ascensionLevel: ascensionLevel, dailyTime: dailyTime);
+#else
+        _ = isCustom;
+        return game.StartNewSingleplayerRun(character, shouldSave: true, acts, modifiers, seed, gameMode,
+            ascensionLevel: ascensionLevel, dailyTime: dailyTime);
+#endif
+    }
+
+    /// <summary>Local net id of a plain singleplayer session (<c>NetSingleplayerGameService.NetId</c>).</summary>
+    private const ulong SingleplayerNetId = 1UL;
+
+    /// <summary>0.113 renamed <c>MerchantEntry.OnTryPurchaseWrapper</c> to <c>OnTryPurchaseUnsynchronized</c>.</summary>
+    public static Task<bool> PurchaseEntry(MerchantEntry entry, MerchantInventory inventory)
+    {
+#if STS2_API_0_113_OR_LATER
+        return entry.OnTryPurchaseUnsynchronized(inventory, ignoreCost: false);
+#else
+        return entry.OnTryPurchaseWrapper(inventory);
+#endif
+    }
+
+    /// <summary>
+    /// 0.113 turned <c>ProceedFromTerminalRewardsScreen</c> into a fire-and-forget wrapper; the awaitable twin
+    /// carries an <c>Async</c> suffix.
+    /// </summary>
+    public static Task ProceedFromTerminalRewardsAsync(RunManager run)
+    {
+#if STS2_API_0_113_OR_LATER
+        return run.ProceedFromTerminalRewardsScreenAsync();
+#else
+        return run.ProceedFromTerminalRewardsScreen();
+#endif
+    }
+
+    /// <summary>0.113 dropped the <c>isRandomCharacterResolution</c> parameter from every lobby screen's PlayerChanged.</summary>
+    public static void NotifyPlayerChanged(NCharacterSelectScreen screen, LobbyPlayer player)
+    {
+#if STS2_API_0_113_OR_LATER
+        screen.PlayerChanged(player);
+#else
+        screen.PlayerChanged(player, isRandomCharacterResolution: false);
+#endif
+    }
+
+    /// <inheritdoc cref="NotifyPlayerChanged(NCharacterSelectScreen, LobbyPlayer)"/>
+    public static void NotifyPlayerChanged(NDailyRunScreen screen, LobbyPlayer player)
+    {
+#if STS2_API_0_113_OR_LATER
+        screen.PlayerChanged(player);
+#else
+        screen.PlayerChanged(player, isRandomCharacterResolution: false);
+#endif
+    }
+
+    /// <inheritdoc cref="NotifyPlayerChanged(NCharacterSelectScreen, LobbyPlayer)"/>
+    public static void NotifyPlayerChanged(NCustomRunScreen screen, LobbyPlayer player)
+    {
+#if STS2_API_0_113_OR_LATER
+        screen.PlayerChanged(player);
+#else
+        screen.PlayerChanged(player, isRandomCharacterResolution: false);
+#endif
+    }
+
+    /// <summary>0.113 split the lobby player's single multiplayer ascension cap into standard/blitz caps.</summary>
+    public static LobbyPlayer CreateLobbyPlayer(ulong id, int slot, CharacterModel character, LobbyPlayer host, bool isReady)
+    {
+        return new LobbyPlayer
+        {
+            id = id,
+            slotId = slot,
+            character = character,
+            unlockState = host.unlockState,
+#if STS2_API_0_113_OR_LATER
+            maxStandardAscension = host.maxStandardAscension,
+            maxBlitzAscension = host.maxBlitzAscension,
+            isModded = true,
+#elif STS2_API_0_111_OR_LATER
+            maxMultiplayerAscensionUnlocked = host.maxMultiplayerAscensionUnlocked,
+            isModded = true,
+#else
+            maxMultiplayerAscensionUnlocked = host.maxMultiplayerAscensionUnlocked,
+#endif
+            isReady = isReady
+        };
+    }
+
+    /// <summary>0.113 dropped <c>GameMode.Custom</c>: a custom lobby is daily mode or the <c>IsCustom</c> flag.</summary>
+    public static bool IsDailyOrCustomLobby(StartRunLobby lobby)
+    {
+#if STS2_API_0_113_OR_LATER
+        return lobby.GameMode == GameMode.Daily || lobby.IsCustom;
+#else
+        return lobby.GameMode is GameMode.Daily or GameMode.Custom;
+#endif
+    }
+
+    /// <summary>0.113 added the <c>isCustom</c> flag to <c>NMultiplayerSubmenu.FastHost</c>.</summary>
+    public static void FastHost(NMultiplayerSubmenu submenu, GameMode gameMode, bool isCustom)
+    {
+#if STS2_API_0_113_OR_LATER
+        submenu.FastHost(gameMode, isCustom);
+#else
+        _ = isCustom;
+        submenu.FastHost(gameMode);
+#endif
     }
 }

@@ -1,3 +1,4 @@
+using AiTeammate.AiTeammateCode.Compat;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -62,7 +63,7 @@ public static class CombatManagerPatch
 
         try
         {
-            CombatManager.Instance.UndoReadyToEndTurn(manager.AiPlayer);
+            GameCompat.UndoReadyToEndTurn(CombatManager.Instance, manager.AiPlayer);
             manager.AiLog.Log("COMBAT", "玩家结束回合时检测到AI仍有能量和可打牌，撤销ready并补发一次战斗决策");
         }
         catch (Exception ex)

@@ -606,7 +606,7 @@ public class DecisionService
         var systemPrompt = BuildSystemPrompt(includeTeamPrinciples: false);
         var smithOption = options.OfType<MegaCrit.Sts2.Core.Entities.RestSite.SmithRestSiteOption>().FirstOrDefault();
         var upgradableCards = aiPlayer.Deck.Cards.Where(c => c.IsUpgradable).ToList();
-        var smithCount = smithOption?.SmithCount ?? 0;
+        var smithCount = smithOption == null ? 0 : GameCompat.SmithCount(smithOption);
 
         var instruction = new StringBuilder();
         instruction.AppendLine($"请以 JSON 格式返回休息决策：{{\"choice\":0~{optionIds.Count - 1}, \"reason\":\"...\", \"upgrade_indices\":[仅在选择SMITH时填写升级卡牌索引]}}");

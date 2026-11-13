@@ -423,18 +423,7 @@ public class AiTeammateManager
         character ??= ResolvePreferredAiCharacter(chars) ?? chars[0];
 
         var hostPlayer = lobby.Players.FirstOrDefault();
-        var aiLobbyPlayer = new LobbyPlayer
-        {
-            id = aiNetId,
-            slotId = slot,
-            character = character,
-            unlockState = hostPlayer.unlockState,
-            maxMultiplayerAscensionUnlocked = hostPlayer.maxMultiplayerAscensionUnlocked,
-#if STS2_API_0_111_OR_LATER
-            isModded = true,
-#endif
-            isReady = false
-        };
+        var aiLobbyPlayer = GameCompat.CreateLobbyPlayer(aiNetId, slot, character, hostPlayer, isReady: false);
 
         lobby.Players.Add(aiLobbyPlayer);
         MainFile.Logger.Info($"AI added to lobby: slot {slot}, char {character.Id.Entry}");

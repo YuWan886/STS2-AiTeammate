@@ -1,3 +1,4 @@
+using AiTeammate.AiTeammateCode.Compat;
 using System;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -21,7 +22,7 @@ internal static class DailyCustomLobbyAiPatch
     {
         try
         {
-            if (__instance.GameMode is not (GameMode.Daily or GameMode.Custom))
+            if (!GameCompat.IsDailyOrCustomLobby(__instance))
                 return;
             if (__instance.NetService?.Type != NetGameType.Host)
                 return;

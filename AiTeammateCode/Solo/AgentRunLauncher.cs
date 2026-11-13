@@ -90,7 +90,8 @@ internal static class AgentRunLauncher
             // dsh plays the local player itself; the built-in solo driver must not compete.
             DisableSoloClimb();
 
-            var gameMode = mode == AgentRunMode.Custom ? GameMode.Custom : GameMode.Standard;
+            var isCustom = mode == AgentRunMode.Custom;
+            var gameMode = isCustom ? GameCompat.CustomRunGameMode : GameMode.Standard;
             var characterName = PromptTextHelper.ResolveLocString(character.Title, character.Id.Entry);
             var modifierText = modifiers.Count == 0
                 ? "none"
@@ -98,7 +99,7 @@ internal static class AgentRunLauncher
             MainFile.Logger.Info($"[Agent] starting {gameMode} run for dsh: char={character.Id.Entry} " +
                                  $"seed={seed} acts={acts.Count} ascension={ascension} modifiers={modifierText}");
 
-            _ = RunAndLogAsync(game, character, seed, acts, ascension, modifiers, gameMode, dailyTime: null);
+            _ = RunAndLogAsync(game, character, seed, acts, ascension, modifiers, gameMode, isCustom, dailyTime: null);
             return (true, $"Starting a {gameMode.ToString().ToLowerInvariant()} run with {characterName} "
                           + $"(ascension {ascension}, seed {seed}, modifiers: {modifierText}).");
         }
@@ -187,7 +188,7 @@ internal static class AgentRunLauncher
                              $"serverTime={plan.ServerTime:O}");
 
         _ = RunAndLogAsync(game, plan.Character, plan.Seed, acts, plan.Ascension, plan.Modifiers,
-            GameMode.Daily, plan.ServerTime);
+            GameMode.Daily, isCustom: false, plan.ServerTime);
 
         try
         {
@@ -330,19 +331,12 @@ internal static class AgentRunLauncher
 
     private static async Task RunAndLogAsync(NGame game, CharacterModel character,
         string seed, List<ActModel> acts, int ascensionLevel, IReadOnlyList<ModifierModel> modifiers,
-        GameMode gameMode, DateTimeOffset? dailyTime)
+        GameMode gameMode, bool isCustom, DateTimeOffset? dailyTime)
     {
         try
         {
-            await game.StartNewSingleplayerRun(
-                character,
-                shouldSave: true,
-                acts,
-                modifiers,
-                seed,
-                gameMode,
-                ascensionLevel: ascensionLevel,
-                dailyTime: dailyTime);
+            await GameCompat.StartNewSingleplayerRunAsync(game, character, acts, modifiers, seed, gameMode, isCustom,
+                ascensionLevel, dailyTime);
         }
         catch (Exception ex)
         {

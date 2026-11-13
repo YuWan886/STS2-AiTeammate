@@ -299,10 +299,10 @@ public partial class LobbyAiCharacterPanel : PanelContainer
             switch (GetParent())
             {
                 case MegaCrit.Sts2.Core.Nodes.Screens.DailyRun.NDailyRunScreen daily:
-                    daily.PlayerChanged(ai.Value, isRandomCharacterResolution: false);
+                    GameCompat.NotifyPlayerChanged(daily, ai.Value);
                     break;
                 case MegaCrit.Sts2.Core.Nodes.Screens.CustomRun.NCustomRunScreen custom:
-                    custom.PlayerChanged(ai.Value, isRandomCharacterResolution: false);
+                    GameCompat.NotifyPlayerChanged(custom, ai.Value);
                     break;
             }
         }
@@ -518,9 +518,17 @@ public partial class AiCharacterPicker : Control
 
         public StartRunLobby Lobby { get; }
 
+#if STS2_API_0_113_OR_LATER
+        public void SelectCharacter(NCharacterSelectButton charSelectButton)
+        {
+            if (charSelectButton?.Character is { } character)
+                _owner.OnCharacterSelected(character);
+        }
+#else
         public void SelectCharacter(NCharacterSelectButton charSelectButton, CharacterModel characterModel)
         {
             _owner.OnCharacterSelected(characterModel);
         }
+#endif
     }
 }

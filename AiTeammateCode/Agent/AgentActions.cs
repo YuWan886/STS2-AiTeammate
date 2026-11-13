@@ -225,10 +225,11 @@ internal static class AgentActions
             return Fail("The main menu is not open yet.");
 
         var mode = AgentRunLauncher.ParseMode(StringArg(args, "mode"));
+        var isCustom = mode == AgentRunMode.Custom;
         var gameMode = mode switch
         {
             AgentRunMode.Daily => GameMode.Daily,
-            AgentRunMode.Custom => GameMode.Custom,
+            AgentRunMode.Custom => GameCompat.CustomRunGameMode,
             _ => GameMode.Standard
         };
 
@@ -239,9 +240,9 @@ internal static class AgentActions
             // FastHost pushes the host submenu and kicks off the net host + lobby screen push; the
             // lobby itself (daily/custom) adds the AI teammate automatically.
             var multiplayer = menu.OpenMultiplayerSubmenu();
-            multiplayer.FastHost(gameMode);
+            GameCompat.FastHost(multiplayer, gameMode, isCustom);
 
-            var modeName = gameMode.ToString().ToLowerInvariant();
+            var modeName = isCustom ? "custom" : gameMode.ToString().ToLowerInvariant();
             MainFile.Logger.Info($"[Agent] hosting a {gameMode} multiplayer lobby");
             return new AgentActionResult(true,
                 $"Hosting a {modeName} multiplayer lobby. Call sts2_wait until the lobby screen is ready "
@@ -1145,7 +1146,7 @@ internal static class AgentActions
     {
         try
         {
-            await entry.OnTryPurchaseWrapper(inventory, false);
+            await GameCompat.PurchaseEntry(entry, inventory);
         }
         catch (Exception ex)
         {

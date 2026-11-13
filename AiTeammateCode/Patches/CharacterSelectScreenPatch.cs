@@ -312,7 +312,7 @@ public static class CharacterSelectScreenPatch
             aiPlayer = manager.GetAiLobbyPlayer(screen.Lobby);
             if (!aiPlayer.HasValue)
                 return;
-            screen.PlayerChanged(aiPlayer.Value, isRandomCharacterResolution: false);
+            GameCompat.NotifyPlayerChanged(screen, aiPlayer.Value);
         }
 
         if (_screenNodes.TryGetValue(screen.GetInstanceId(), out var nodes))
@@ -337,7 +337,7 @@ public static class CharacterSelectScreenPatch
 
         ApplyCharacterPreview(screen, charSelectButton, characterModel, isAiEdit: true);
         ApplyReadyUi(screen, aiPlayer.Value, isAiEdit: true);
-        screen.PlayerChanged(aiPlayer.Value, isRandomCharacterResolution: false);
+        GameCompat.NotifyPlayerChanged(screen, aiPlayer.Value);
 
         if (_screenNodes.TryGetValue(screen.GetInstanceId(), out var nodes))
             RefreshUi(nodes, screen.Lobby);
@@ -358,7 +358,7 @@ public static class CharacterSelectScreenPatch
             return false;
 
         ApplyReadyUi(screen, aiPlayer.Value, isAiEdit: true);
-        screen.PlayerChanged(aiPlayer.Value, isRandomCharacterResolution: false);
+        GameCompat.NotifyPlayerChanged(screen, aiPlayer.Value);
 
         if (_screenNodes.TryGetValue(screen.GetInstanceId(), out var nodes))
             RefreshUi(nodes, screen.Lobby);
@@ -379,7 +379,7 @@ public static class CharacterSelectScreenPatch
             return false;
 
         ApplyReadyUi(screen, aiPlayer.Value, isAiEdit: true);
-        screen.PlayerChanged(aiPlayer.Value, isRandomCharacterResolution: false);
+        GameCompat.NotifyPlayerChanged(screen, aiPlayer.Value);
 
         if (_screenNodes.TryGetValue(screen.GetInstanceId(), out var nodes))
             RefreshUi(nodes, screen.Lobby);
@@ -569,20 +569,6 @@ public static class CharacterSelectScreenPatch
             IsSelectedField?.SetValue(button, ReferenceEquals(button, target));
             RefreshStateMethod?.Invoke(button, null);
         }
-    }
-}
-
-[HarmonyLib.HarmonyPatch(typeof(NCharacterSelectScreen), nameof(NCharacterSelectScreen.SelectCharacter))]
-public static class CharacterSelectScreenSelectCharacterPatch
-{
-    [HarmonyLib.HarmonyPrefix]
-    public static bool Prefix(NCharacterSelectScreen __instance, NCharacterSelectButton charSelectButton, CharacterModel characterModel)
-    {
-        if (!CharacterSelectScreenPatch.IsEditingAi(__instance))
-            return true;
-
-        CharacterSelectScreenPatch.HandleAiCharacterSelected(__instance, charSelectButton, characterModel);
-        return false;
     }
 }
 

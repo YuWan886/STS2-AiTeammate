@@ -115,6 +115,8 @@ try {
     # Variant builds disable PckPacker to avoid packing per snapshot; the localization JSON is
     # shared by every variant, so pack it once into the mod root.
     Write-Host "Packing shared localization .pck ..."
+    # PckPacker writes into .godot/mono/temp/bin/<Configuration>; a fresh clone may not have it yet.
+    New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot ".godot/mono/temp/bin/$Configuration") | Out-Null
     & dotnet msbuild $contentProject -t:PackPck `
         "/p:Configuration=$Configuration" `
         "/p:Sts2DataDir=$oldestDataDir" `

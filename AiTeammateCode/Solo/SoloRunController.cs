@@ -787,14 +787,8 @@ public static class SoloRunController
     {
         try
         {
-            await game.StartNewSingleplayerRun(
-                character,
-                shouldSave: true,
-                acts,
-                Array.Empty<ModifierModel>(),
-                seed,
-                GameMode.Standard,
-                ascensionLevel: ascensionLevel);
+            await GameCompat.StartNewSingleplayerRunAsync(game, character, acts, Array.Empty<ModifierModel>(), seed,
+                GameMode.Standard, isCustom: false, ascensionLevel, dailyTime: null);
         }
         catch (Exception ex)
         {

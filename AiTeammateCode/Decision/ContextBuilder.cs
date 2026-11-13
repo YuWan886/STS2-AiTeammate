@@ -1,3 +1,4 @@
+using AiTeammate.AiTeammateCode.Compat;
 using System.Text;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -1443,7 +1444,7 @@ public class ContextBuilder
                 .ToList();
 
             sb.AppendLine();
-            sb.AppendLine($"如果选择 SMITH，本次需要从以下可升级卡牌中选择 1~{smithOption.SmithCount} 张，并返回对应索引：");
+            sb.AppendLine($"如果选择 SMITH，本次需要从以下可升级卡牌中选择 1~{GameCompat.SmithCount(smithOption)} 张，并返回对应索引：");
             for (int i = 0; i < upgradableCards.Count; i++)
             {
                 var card = upgradableCards[i];

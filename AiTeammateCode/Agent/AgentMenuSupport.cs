@@ -915,7 +915,7 @@ internal static class AgentMenuSupport
         manager.SetAiReady(lobby, true);
         var again = manager.GetAiLobbyPlayer(lobby);
         if (again.HasValue)
-            screen.PlayerChanged(again.Value, false);
+            GameCompat.NotifyPlayerChanged(screen, again.Value);
 
         detail = $"Added and readied the AI teammate ({AiNames.DisplayName}).";
         return true;

@@ -200,7 +200,7 @@ public static class SoloRoomAutomation
                 if (state.Map.SecondBossMapPoint != null
                     && state.CurrentMapCoord == state.Map.BossMapPoint.coord)
                 {
-                    await run.ProceedFromTerminalRewardsScreen();
+                    await GameCompat.ProceedFromTerminalRewardsAsync(run);
                 }
                 else
                 {
@@ -211,7 +211,7 @@ public static class SoloRoomAutomation
                 return;
             }
 
-            await run.ProceedFromTerminalRewardsScreen();
+            await GameCompat.ProceedFromTerminalRewardsAsync(run);
             manager.AiLog.Log("AI_ACTION", "奖励领取完成，返回地图");
         }
         catch (Exception ex)
@@ -314,7 +314,7 @@ public static class SoloRoomAutomation
                     // 但保持和多人同一条正确路径，避免任何情况下误删真人的牌。
                     success = entry is MerchantCardRemovalEntry removalEntry
                         ? await AiCardShopRemoval.TryBuyAsync(aiPlayer, removalEntry, msg => manager.AiLog.Log("SHOP", msg))
-                        : await entry.OnTryPurchaseWrapper(inventory);
+                        : await GameCompat.PurchaseEntry(entry, inventory);
                 }
                 catch (Exception ex)
                 {
