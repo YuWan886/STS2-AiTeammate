@@ -355,8 +355,28 @@ internal static class AgentMenuSupport
                 JsonValue.Create("custom")),
             ["can_start_daily"] = EpochRevealed<DailyRunEpoch>(),
             ["can_start_custom"] = EpochRevealed<CustomAndSeedsEpoch>(),
+            ["host_modes"] = HostModesJson(),
             ["modifiers"] = ModifiersJson()
         };
+    }
+
+    /// <summary>
+    /// Modes <c>sts2_host</c> may host. Dread/Blitz are resolved from the running game's enum because
+    /// the constants only exist from 0.113.1 on; an older host simply does not list them.
+    /// </summary>
+    private static JsonArray HostModesJson()
+    {
+        var modes = new JsonArray(
+            JsonValue.Create("standard"),
+            JsonValue.Create("daily"),
+            JsonValue.Create("custom"));
+
+        if (GameCompat.GameModeByName("Dread") != null)
+            modes.Add(JsonValue.Create("dread"));
+        if (GameCompat.GameModeByName("Blitz") != null)
+            modes.Add(JsonValue.Create("blitz"));
+
+        return modes;
     }
 
     /// <summary>Good/bad run modifiers the agent may pass to <c>sts2_start_run</c> / custom lobbies.</summary>
@@ -491,6 +511,14 @@ internal static class AgentMenuSupport
                 break;
         }
 
+        // Dread / Blitz (0.113.1+) push their own lobby screens. Their types do not exist in the older
+        // variants this bundle still ships, so they are recognized by name and read by reflection.
+        if (!lobbyScreen && TryFillNewModeLobby(top, capture, out var newModeLobby))
+        {
+            lobby = newModeLobby;
+            lobbyScreen = true;
+        }
+
         // A lobby pushed by the host submenu sits one level deeper than a standalone screen.
         if (lobbyScreen && StackContainsHostSubmenu(mainMenu))
             capture.Depth = 2;
@@ -558,6 +586,8 @@ internal static class AgentMenuSupport
                 break;
             case "daily_lobby":
             case "custom_lobby":
+            case "dread_lobby":
+            case "blitz_lobby":
                 capture.Notes.Add("Press a lobby button with sts2_choose index=<n>; leave the lobby with sts2_proceed. "
                                   + "The AI teammate is added and readied automatically; change its character with the "
                                   + "panel's change-character button, then press one of the ai_character options.");
@@ -823,7 +853,33 @@ internal static class AgentMenuSupport
         return null;
     }
 
-    /// <summary>True when a node lives inside the daily/custom lobby AI character picker overlay.</summary>
+    /// <summary>
+    /// Classifies the Dread / Blitz lobby screens (added in 0.113.1). They behave exactly like the
+    /// daily/custom screens — their own start-run lobby plus a wrapped player list — but naming their
+    /// types would break the older variants, so the phase comes from the type name and the lobby from
+    /// the public <c>Lobby</c> property.
+    /// Dread/Blitz 大厅（0.113.1 新增）按类型名识别，走同一个 lobby 快照。
+    /// </summary>
+    private static bool TryFillNewModeLobby(NSubmenu top, AgentMenuCapture capture, out StartRunLobby? lobby)
+    {
+        lobby = null;
+        var (phase, title) = top.GetType().Name switch
+        {
+            "NDreadScreen" => ("dread_lobby", "Dread run lobby"),
+            "NBlitzScreen" => ("blitz_lobby", "Blitz run lobby"),
+            _ => (string.Empty, string.Empty)
+        };
+        if (phase.Length == 0)
+            return false;
+
+        capture.Phase = phase;
+        capture.Screen = phase;
+        capture.Title = title;
+        lobby = SafeLobby(() => top.GetType().GetProperty("Lobby")?.GetValue(top) as StartRunLobby);
+        return true;
+    }
+
+    /// <summary>True when a node lives inside the new-mode / daily / custom lobby AI character picker overlay.</summary>
     private static bool IsInsideAiPicker(Node node)
     {
         for (var parent = node.GetParent(); parent != null; parent = parent.GetParent())

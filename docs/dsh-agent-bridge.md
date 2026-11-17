@@ -1,615 +1,311 @@
-# dsh 接管游戏操作 —— 开发文档（插件方案）
+# dsh 接管游戏操作 —— 开发参考
 
-> 状态：v1 设计稿
-> 目标读者：维护 AiTeammate 的开发者
-> 相关代码：`AiTeammateCode/Agent/`（C# 游戏侧）、独立仓库 `dsh-sts2`（npm 上的 dsh 插件）
+> 读者：维护 AiTeammate 的开发者。
+> 游戏侧代码：`gameplay/AiTeammate/AiTeammateCode/Agent/`；独立插件：npm 包 `dsh-sts2`（另仓 `YuWan886/dsh-sts2`，不随 Mod 打包）。
+> 本文只描述已实现的行为；与代码冲突时以代码为准，关键处已标注修正。
 
-## 1. 目标
+## 1. 目标与两种接管形态
 
-给 AiTeammate 增加一个**外部 Agent 接管（External Agent Bridge）**能力：让 **dsh（DeepSeek Harness）** 直接连进正在运行的游戏，读取完整局面、调用动作工具，像人一样打完一整局。
+给 AiTeammate 开一条外部 Agent 接管通道：**dsh（DeepSeek Harness）** 通过本地 TCP 桥接读取完整局面、调用 `sts2_*` 动作工具，像人一样打完一整局。桥接本身是**被动**的（请求/响应），所有"事件"（AI 入局邀请、玩家聊天）都只能靠 dsh 主动轮询获得。
 
-关键诉求：
+选 dsh 插件而不是 MCP，只因为两件 MCP 给不了的事：工具名是原生的 `sts2_*`（走 dsh 自己的工具流水线/并行/取消策略），以及插件能用 `ctx.agents` 在 agent 空闲时主动排队续玩消息。代价是游戏侧协议得自己定（见第 3 节）。
 
-1. **dsh 直接操作游戏**：决策、循环、重试都由 dsh 自己完成，不把 dsh 当成普通 LLM 后端。
-2. **工具调用对 dsh 是原生的**：`sts2_*` 工具通过 **dsh 插件**（`ctx.tools.register`）注册，和 dsh 自带的 `bash` / `fs` 工具完全同构，支持 dsh 的工具流水线、并行调用、取消与权限策略。
-3. **可以真正“接管”**：插件能通过 `ctx.agents` 在 agent 空闲时主动排队续玩消息，不需要玩家每个回合手动说“继续”。
-4. 不破坏现有能力：内置 AI 队友、AI 独自爬塔、聊天、弹幕全部保持原样。
-5. 与现有实现最大化复用：读牌堆/遗物、出牌、地图、奖励、商店、篝火、事件都复用已有代码路径。
-
-## 1.1 v2：dsh 成为 AI 的大脑
-
-v1 只让 dsh 操作**本地真人玩家**。v2 增加了一条更重要的通道：**对接 dsh 后，AI 玩家（单人爬塔的本地玩家、多人局的 AI 队友）的决策也由 dsh 给出**。
-
-- 触发条件：TCP 桥接在跑（`EnableAgentBridge`）、允许动作（`AgentBridgeAllowActions`）、且至少有一个客户端连着（`AgentBridgeService.ExternalAgentDriving`）。
-- 拦截点只有一个：`DecisionService.RequestWithToolsAsync`（所有战斗/选牌/选路/篝火/商店/事件/选卡/海克斯决策都从这里发起）。命中时不再调用配置的 LLM 后端，而是把这次调用挂在 `AgentDecisionBroker` 上等待。
-- 快照里出现 `phase=ai_decision` + `decision{id,kind,prompt,system_prompt,answer_with}`；dsh 用 `sts2_decide {decision:{...}}` 回答，内容会被原样交给现有的 `ResponseParser`，所以解析、校验、兜底、执行全部不变。
-- 好处：
-  - 单人爬塔不再需要关掉开关：`SoloRunController` 的循环照常跑，只是每步决策在等 dsh，天然「自动退位」。
-  - 多人局里 AI 队友的选牌/事件/商店/篝火/地图投票也一并交给 dsh（这些流程只存在于数据层，本地没有可点的 UI）。
-  - 没有 AI 玩家（普通单人局）时行为与 v1 相同：dsh 用 UI 动作自己玩。
-- 失败与超时：单次决策的等待预算是 `AgentFallbackSeconds × 3`（至少 60 秒，最多 300 秒），这样模型思考得久一点不会被误判；客户端断开（客户端数降到 0）会立刻 `Abort`，等待方返回空内容，走 mod 原有的兜底路径；战斗回合的 45 秒硬安全网在有外部大脑时放宽到 `330 + 90×(单回合决策次数-1)` 秒。
-- 连着 ≠ 在驱动：桥接插着但 dsh 一直没请求（比如 dsh 没在 autoplay、也没人让它干活）时，`AgentDecisionBroker` 不再挂起决策，直接走自带后端。判定依据是 `AgentBridgeService.ClientIdleSeconds`（每次 dsh 请求刷新，正在跑的 `sts2_wait` 也算活着）；静默超过 `AgentFallbackSeconds` 就整段跳过桥接，所以“连着但不干活”不会再让 AI/整局卡 5 分钟。dsh 一旦恢复调用（哪怕是 `sts2_state`），下一次决策又会回到 dsh 手里。
-- 动作归属：`controlled.kind=ai` 时 `sts2_play_card` 等 UI 动作会被拒绝（避免与内置执行器抢同一玩家），只能用 `sts2_decide`。
-- **v2.4 信息与执行**：外部大脑模式下的战斗 prompt 会带己方遗物与计数、敌人意图的多段伤害/更细状态；快照在 `ai_decision` 时带 `last_decision{id,kind,requested,dropped,valid}`（上一条决策哪些动作被校验丢弃及原因）；`combat` 执行按 dsh 返回的 actions 原序进行（药水仍最先），`deferred_actions` 仍走协同等待；快照 token 不再包含 `decision.age_seconds`，避免等待期间每 0.1 秒抖动。
-
-### 1.2 战斗中的抽牌（v2.1）
-
-内置 AI 的战斗执行器在打完计划牌之后还有一个 Phase 3：用启发式把手里剩下能打的牌全部打掉。对 dsh 来说这一步是错的——出牌、药水抽到的新牌它根本没看见，就被启发式花掉了。现在：
-
-- `controlled.kind=ai` 时 **Phase 3 关闭**（`CombatDecisionExecutor` 判 `AiTeammateManager.ExternalBrainActive`）。每执行完一次决策，只要仍有能量/辉星且手牌里有能打出的牌，`ProcessCombatTurnAsync` 会**再挂一次决策**，prompt 里就是抽完牌之后的新手牌与新牌堆；单回合最多 6 次决策（内置后端仍是 3 次）。
-- **执行模式必须全房一致（v2.4.5 修复）**：`ExternalBrainActive` 不是本机开关。房主取本机 dsh 状态（`AgentDecisionBroker.Enabled`），客户端**跟随房主战斗计划里的 `externalBrain` 标记**（`DecisionResult.ExternalBrain` → `AiCombatPlanCodec` 的 `externalBrain` 字段），并按它调整单回合决策次数上限。2026-11-07 双人实测的掉线就是这么来的：房主（dsh 驱动）按模型原序出牌，客户端（没挂 dsh）走内置“先技能后攻击”分支，同一份计划在两端播放顺序不同，AI 弃牌堆顺序分叉 → `StateDivergence` 踢人。
-- 计划里显式返回 `{"type":"end_turn"}` 时立即停止追加决策（内置后端也尊重该动作，只是它的 Phase 3 已经先出完剩余牌）。
-- `ai_decision` / `ai_busy` 两种快照都带上了 `combat` 段（实时手牌、能量/辉星、敌人、牌堆张数）。执行期间（`ai_busy`）也可以用 `sts2_state` 直接看到抽到的牌；`options` 在 AI 模式下仍为空——出牌要用 `sts2_decide`，不用索引。
-- `combat.hand[].cost` 是**当前实际费用**（升级降费、临时费用修正都算进去，如「全身撞击+」= 0）；`upgraded` 表示是否已经升级。`card_reward` / `card_select` / `card_choice` 的 `detail` 末尾会跟一句「升级后: …」，未升级的卡可以直接比较升级收益。
-- `combat.enemies[]` 带 `index / label / hp / max_hp / block / powers / alive / intent`：`index` 是该敌人在 `CombatState.Enemies` 里的下标（默认按遭遇槽位排序，约等于画面从左到右），`label` 就是 `名字[#索引]`；`block` 是护甲，`powers` 与 `player.powers` 同构（`name / id / amount`，含负面层数），`intent` 是当回合意图；已死敌人也留在列表里（`alive:false`），方便判断复活/召唤。
-- 决策内容里返回 `tool_calls`（`read_pile` / `card_info` …）同样有效：游戏在主线程执行完只读工具，把结果拼进新 prompt 后**再挂一次决策**，不会像以前那样掉进启发式兜底。图片类工具（`screenshot`）没有图像回传通道，`sts2_screenshot` 请当作独立工具调用。
-- 内置 LLM 后端行为不变：仍是每回合最多 3 次决策，Phase 3 照常补牌。
-
-### 1.3 手牌选择、运行控制与人格（v2.2）
-
-- dsh 接管本地玩家时，`CardSelectCmd.FromHand` / `FromHandForUpgrade` 不再打开原版手牌选择 UI（`NPlayerHand.SelectCards` 会一直等真人点击，dsh 无法完成；期间 `play_card` / `end_turn` 还会抢着执行，造成软锁与 ERROR 刷屏）。现在改为在 `AgentDecisionBroker` 挂一个 `kind=hand_select` 决策：`options=[{index, card, upgradable, detail}]`（prompt 里每张牌带费用、当前效果、「升级后」效果和**词缀/悬停侧边栏**，`detail` 与之一致），决策对象额外带 `min_select` / `max_select` / `allow_empty`，dsh 用 `sts2_decide {"indices":[...], "reason":"..."}` 回答，模组照原有写法 `SyncLocalChoice` 交回；超时/未回答则启发式兜底，绝不把空选择交给游戏。
-  - **连着 ≠ 在驱动**：接管门槛是 `AgentDecisionBroker.AgentWatching`（`AgentFallbackSeconds` 窗口内有非被动请求）。只是挂着客户端、真人在自己打牌时不接管，否则武装（Armaments）会被静默启发式随机升级，`min=0` 的牌（Guards / Purity / Well Laid Plans / 赌徒系列）会直接按 0 张空过。
-  - **区间语义**：`min==max` 就是正好选这么多；`min<max` 时可少选（由游戏确认），`min==0` 时 `{"indices":[]}` = 「不选并确认」。模组只把少于 `min` 的结果补到 `min`，不再强行补到上限；启发式兜底也按真实区间取牌（`min=0` 的牌不再一律空过）。
-  - **AI 自己的选牌**：单人局里 dsh 是 AI 的大脑，AI 玩家的 `FromHand` 也挂决策交给 dsh；多人局不行——每个 peer 都在本地模拟 AI，`AgentDecisionBroker.Enabled` 是「本机」标志，让它决定 AI 拿哪张会撕开各端的牌堆（同 `externalBrain` 那条红线），所以多人局一律走确定性启发式。
-  - **选牌药水 / 牌堆选牌同样交给 dsh**（单人局）：`FromChooseACardScreen`（Attack/Skill/Power/Colorless Potion、Discovery、Quasar、Splash…）和 `FromCombatPile`（Droplet of Precognition / Liquid Memories，以及 Cleanse、Headbutt、Tutor、Secret Weapon 这类抽/弃牌堆取牌）现在挂 `kind=card_selection` 决策，回答形状仍是 `{"indices":[...], "reason":"..."}`，`min_select` / `max_select` / `allow_empty` 照旧；牌面文本按候选牌所在的牌堆取值，`options[].detail` 同样带词缀侧边栏。Ashwater / Touch of Insanity / Gambler's Brew 走 `FromHand`（`FromHandForDiscard` 内部就是 `FromHand`），本来就已经是 dsh 决策。没人回答时回退 `PickBestForGain`（挑最强的牌，而不是选牌屏那套「挑最差的牌」启发式）；多人局不挂决策，各端跑同一个确定性启发式，理由同上。
-  - **词缀侧边栏**：`PromptTextHelper.GetHoverTipText` 读 `CardModel.HoverTips`（标题+说明），这是 mod 新增机制唯一存在的文本通道；只有**原版内容**的提示会按「卡面已经出现该词」去重，模组来源的提示（自定义能力/附魔/苦痛，`CanonicalModel` 不在 sts2.dll 里）一律保留——mod 卡面往往只写机制名字、解释只存在于侧边栏。<br>（历史：2026-11 修掉「接管判定只看『连上了』」和「区间被折叠成固定张数」两个 bug。）
-- `sts2_play_card` / `sts2_end_turn` 在 `NPlayerHand.IsInCardSelection` 为真时直接拒绝并提示先回答选牌决策。
-- 选目标：休息处 MEND（以及少数需要点选目标的药水/遗物）会打开原版 `NTargetManager` 的选目标模式并禁用底层按钮；桥接把这一状态识别为 `phase=target_select`，`options` 是可点的角色/生物（遵守 `NTargetManager` 自己的过滤，例如 MEND 不能选自己），最后一个索引是取消。`sts2_choose index=<n>` 会先 hover 该节点再完成选择，等价于鼠标点击；点取消则让原动作返回失败、休息处重新启用选项。
-- 运行控制工具：`sts2_pause` / `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon`。暂停菜单（capstone submenu）不在 overlay 栈里，快照单独识别为 `phase=paused`、不可行动。
-- 人格：`AgentDecisionBroker.Enabled` 时 system prompt 不再包含 mod 的人格档案与长期记忆（改为 `prompt.system.external_agent`），人格由 dsh 自己决定；只保留 JSON/语言等输出要求与团队协作原则。
-
-### 1.4 聊天面板由 dsh 回复（v2.3）
-
-dsh 接管时，游戏聊天面板里的玩家发言也交给 dsh，而不是配置的 LLM 后端：
-
-- 玩家在面板发言 → `ChatManager` 记录消息后询问 `AgentChatRelay`：只要**最近 10 秒内有插件在轮询 `sts2_chat_poll`**，就把这条消息放进中继队列、不再请求后端。
-- 插件以 `<sts2_chat>` 消息把队列内容注入当前对话，模型用 `sts2_chat_send {text, reply_to}` 回复；mod 走 `ChatManager.AddAiMessage` 渲染，面板、气泡、历史与内置后端完全一致。注入必须走 dsh 的 **`steer()`（next-step）而不是 `followup()`（next-turn）**：自动驾驶时一轮可以持续整局，`followup` 会把聊天排到那一轮结束之后，玩家等不到回复、mod 先超时补答，模型随后又只能从快照猜 `reply_to`——这正是 v2.4.1 之前“dsh 回复不了、变成 mod 自己回”的根因。
-- `sts2_chat_send` 可带 `directives`（与内置聊天 JSON 同构）与 `nickname`，所以聊天原有的“记录战术 / 改昵称”副作用不会丢。
-- **影响决策的三层保障**：① 消息进入 dsh 的对话上下文（steer 到当前回合）；② `sts2_state` / `sts2_wait` 快照的 `chat` 段带 `recent`、`unread` 与 **`pending[{seq,from,text,age_seconds}]`**，未读时 `notes` 直接指向 `chat.pending` 的 seq，模型不必再猜；`sts2_chat_poll` 只是插件内部使用的桥接方法，**不是注册给模型的 dsh 工具**，所以提示里不再让模型调用它；③ dsh 决策提示词末尾追加 `[玩家最近聊天]`（`DecisionService.AppendRecentChat`），即使对话上下文被压缩，玩家最新的话仍会进入本次决策。
-- **能力探测而非版本猜测**：插件只有在绑定了一个 dsh 对话后才轮询（任意 `sts2_*` 工具调用、`sts2_autoplay`、自动接管都会绑定）。旧版插件、没绑定对话的 dsh、桥接关闭时不会产生轮询，聊天自动走回内置后端。
-- **回退与 `reply_to` 校验**：超过 `AgentChatReplyTimeoutSeconds`（默认 120 秒）未回复、或客户端断开，`AgentChatFallbackToBackend` 打开时由内置后端补答并在面板注明。`sts2_chat_send` 只在 `reply_to` 命中一条**仍在等待**的记录时把它标记为已回答；`reply_to` 命中不了任何存活记录（被清理、猜错、mod 重启）时整条拒绝并回传仍待回复的 seq 列表，让模型用同一段文字重发——不再“照常渲染但不解决等待”。已由内置模型补答的 seq 再收到 dsh 迟到回复时仍会渲染（结果里注明是迟到回复），因为玩家更愿意看到 dsh 的答案；不带 `reply_to` 且只有一条待回复时自动绑定，多条时按新发言发送并提示还有哪些 seq 待回。
-- **不污染决策活性**：`sts2_chat_poll` / `sts2_chat_send` 与 `sts2_takeover` 一样不计入 `AgentBridgeService` 的“dsh 还活着”打点，否则 1 秒一次的聊天轮询会让“dsh 静默回退”永久失效。聊天也不再触发内置的 `TryAutoMessage` 自动闲聊，避免两个声音。
-- 只读模式（`AgentBridgeAllowActions=false`）下聊天中继照常工作：聊天不是游戏动作。
-
-### 1.5 主菜单可见、三种开局与程序化建主（v2.4）
-
-v2.3 及以前，只要 `RunManager` 没有局内状态，快照就一律报 `phase=menu`：主菜单的子菜单、多人建房、每日/自定大厅、角色选择全都看不见，dsh 只能盲开标准单人局；而且它还能在别人已经打开的大厅里再起一局单人，把大厅与运行状态一起弄坏。v2.4 把主菜单整层暴露出来：
-
-- 快照读取 `NGame.Instance.MainMenu.SubmenuStack.Peek()`，按栈顶界面给出 `menu` / `char_select` / `daily_lobby` / `custom_lobby` 四个 phase，并带 `menu.screen`（`main` / `solo` / `multiplayer` / `host` / `join_friend` / `other` 等）区分是哪一层。
-- 每个界面把**可点元素**枚举进 `options[]`（`kind=button|character|modifier|ai_join|ai_remove`）：主菜单文本按钮、子菜单大按钮、角色选择头像、自定模式词条勾选框、Embark/Back 等；`sts2_choose {index}` 按下它们，`sts2_proceed` 等价返回上一层（有 Back 按钮就按，没有就 `SubmenuStack.Pop()`）。
-- 大厅界面额外带 `menu.lobby`：模式、是否房主/单人、玩家列表（名字、角色、是否就绪、是否 AI、是否本地）、`ai_in_lobby`、`can_begin`、种子/进阶/每日服务器时间。
-- 主菜单根会返回 `menu.characters` / `max_ascension` / `can_start_run` / `can_continue`，以及 `menu.modes`、`menu.can_start_daily`、`menu.can_start_custom`、`menu.modifiers`（每日/自定开局可选的词条 id 与名称）。
-- 有弹窗（`NModalContainer.OpenModal`）时快照 `actionable=false`、`blocked_by=modal`，并在 `notes` 里点名弹窗类型——dsh 不会对着被遮住的按钮乱点。
-
-开局与建房也从“只能标准单人”扩成三模式：
-
-- `sts2_start_run {mode: standard|daily|custom, character, ascension, seed, modifiers[]}`。`daily` 不接收角色/进阶/种子/词条：报名日期取 `TimeServer.FetchDailyTime`（失败时回退本地时间，与游戏一致），种子按 `dd_MM_yyyy_1p` 规范化，角色/进阶/2 好 1 坏词条用与 `NDailyRunScreen.SetupLobbyParams` 相同的 RNG 链复算（`DailyRunCompat`，0.107/0.111 的 RNG 差异隔离在 Compat 里），最终以 `GameMode.Daily` + `dailyTime` 直接开局。`custom` 会校验并解析 `modifiers`（id 或名称；`CharacterCards:<角色id>` 可指定牌组来源），互斥词条会拒绝。
-- `sts2_host {mode}`：在干净的主菜单根上打开多人子菜单并 `FastHost(mode)`。**每日/自定大厅没有「添加 AI」按钮，房主一人永远满足不了 `IsAboutToBeginGame`**（多人大厅 1 人拒绝开局），所以 `StartRunLobby.AddLocalHostPlayer` 之后会自动加入 AI 队友并标记 ready；标准大厅仍由角色选择界面的 `ai_join` 选项一键加入 + 准备。
-- 开局/建房/续档都要求主菜单根（`SubmenuStack.Peek() == null`）：任何大厅/子菜单打开时都会被拒绝并提示先 `sts2_proceed`。这堵上了“在大厅里误开单人局”的洞。
-
-
-### 1.6 目标寻址：同名敌人不再“取第一个”（v2.4.4）
-
-旧实现里 `target` 只是个名字字符串，`CombatDecisionExecutor` 用「名字/id 双向包含」取 `FirstOrDefault`：两只同名敌人时永远命中列表里靠前的那只（和血量无关），写「名字 12/50」也还是第一只；而名字匹配不上（比如只写了索引数字）时 `target` 变 null，`CardCmd.AutoPlay` 对 `AnyEnemy` 会**随机**挑一个存活敌人——两种情况都不报错，看上去还成功。
-
-v2.4.4 起：
-
-- 新增 `Decision/CombatTargetResolver.cs`，是敌人/队友目标的唯一解析入口（AI 决策、校验器、本地动作 `sts2_play_card` 共用）。支持的写法：
-  - `"#[n]"` / `"[n]"` 之外的纯数字 `"n"`：按 `combat.enemies[].index` 取，越界或已死亡会明确报错；
-  - `"名字#n"` / `"名字[n]"` 会额外校验第 n 个敌人的名字是否与请求一致，不一致就报“索引已过期”；
-  - 敌人名 / 怪物 id；只写名字且同名敌人 >1 时**返回歧义错误**（列出候选 `#0, #1`），不再静默取第一个；
-  - `"名字(12/50)"`（当前血/上限）可精确指定同名敌人中的一只；
-  - 自身别名（`self`/`我`/`自己`…）与玩家名（队友支援牌/药水）。
-- `DecisionAction.ResolvedTarget`：校验阶段就把目标锁成具体 `Creature`，执行时直接用这个实例。这样同一回合里前面的牌打死一个敌人、`Enemies` 下标前移，也不会把后面的牌打到另一只身上。
-- 目标解析失败的动作会被 `DecisionValidator` 丢弃并写进 `last_decision.dropped`；执行器 `PlayOneCard` 另有一道兜底：需要目标却拿到 null 时**拒绝出牌**，绝不交给 `AutoPlay` 随机。
-- `last_decision` 新增 `resolved`：`["打击->骷髅[#1]", ...]`，dsh 能直接看到每张牌实际锁定的实例；战斗日志也写成 `Name[#n]`。
-- 战斗 prompt 的敌人行改为 `[#0] 名字(血/上限 格挡) 意图`，并明确提示“同名敌人必须用 [#n] 或 名字(血/上限)”；快照在存在同名存活敌人时会在 `notes` 里提醒。
-- 聊天 `focus_target` 指令同样支持 `#n` 与血量写法。
-
-
-## 2. 为什么用 dsh 插件而不是 MCP
-
-| 维度 | dsh 插件（本方案） | MCP 服务器 |
+| | `controlled.kind=local` | `controlled.kind=ai` |
 |---|---|---|
-| 工具名 | 原生 `sts2_play_card` | `mcp__sts2__sts2_play_card` |
-| 工具描述/参数 | 与 dsh 工具同源，可做 UI 呈现、并行安全声明、超时策略 | 由 MCP 桥接，能力受 MCP 子集限制 |
-| 自动续玩 | `ctx.agents` 主动 `followup()` | 只能靠模型自己循环，或再写一个外部驱动 |
-| 生命周期 | `ctx.effect` 自动清理、HMR、配置校验 | 单独进程/端口，需要自行管理 |
-| 游戏侧协议 | 极简 TCP 行 JSON（无需实现 MCP/HTTP） | 需要完整 MCP Streamable HTTP |
-| 安装 | `dsh plugin add <本地目录>` 或 `--patch` | 手改 cordis.patch.yml |
+| 谁在玩 | dsh 直接操作本地真人玩家 | dsh 当 AI 玩家的大脑，Mod 当手 |
+| 触发条件 | 桥接运行 + `AgentBridgeAllowActions` + 至少一个客户端 | 同上，且本局存在 `AiTeammateManager.AiPlayer`（单人爬塔或多人 AI 队友） |
+| 工具面 | 出牌/药水/结束回合/`choose`/`select_cards`/`proceed` | 只有 `sts2_decide`；UI 动作在 `AgentActions.Start` 因 `snap.AiControlled` 直接失败（`AgentActions.cs:124`） |
+| 选牌 | `NPlayerHand.SelectCards` 被换成 `kind=hand_select` 决策 | AI 自己的选牌也走决策，但只在单人局；多人局各端跑同一份确定性启发式 |
+| 多人局语义 | 只驱动自己那份；别人的回合/投票不受影响 | 计划经 `externalBrain` 字段同步，各端执行模式必须一致 |
 
-结论：插件方案代码更少、体验更完整，且完全走 dsh 官方扩展点。
+`AgentBridgeAllowActions=false` 为只读：`sts2_hello/takeover/state/wait/read/note/set_nickname/screenshot/chat_poll/chat_send` 仍可用，其余返回 `Action tools are disabled in the mod settings.`（`AgentToolExecutor.cs:53`）。
 
-## 3. 总体架构
+## 2. 架构与服务器生命周期
 
 ```
-┌──────────────────────────── Windows 游戏进程 ────────────────────────────┐
-│  Godot 主线程                         AgentBridge 线程                     │
-│  ┌──────────────────────┐  MainThread.Invoke   ┌──────────────────────┐  │
-│  │ AgentSnapshotBuilder │ <──────────────────── │ AgentBridgeServer    │  │
-│  │ AgentActions         │                       │  TcpListener         │  │
-│  │ (UI / 游戏 API)      │ ────────────────────> │  行 JSON 请求/响应    │  │
-│  └──────────────────────┘                       └──────────┬───────────┘  │
-└────────────────────────────────────────────────────────────┼──────────────┘
-                                                             │ 127.0.0.1:<port>
-                                                  ┌──────────▼───────────┐
-                                                  │ dsh 进程              │
-                                                  │  dsh-sts2 插件        │
-                                                  │  ├ ctx.tools.register │
-                                                  │  ├ TCP 客户端         │
-                                                  │  └ autoplay 循环      │
-                                                  │  └ ctx.agents.followup│
-                                                  └──────────────────────┘
+Godot 主线程                                桥接线程（Task）
+AgentSnapshotBuilder.Capture  <── MainThread.Invoke ── AgentBridgeServer（TcpListener）
+AgentActions.Start            ── MainThread.Invoke ──> 127.0.0.1:<port> 行 JSON
+AgentDecisionBroker.RequestAsync（挂起，等 sts2_decide）
 ```
 
-- 游戏侧只监听 **127.0.0.1**，不对外网开放。
-- 游戏状态读取/动作全部在 Godot 主线程执行；桥接线程只做 socket I/O、等待与 JSON。
-- 动作采用**启动后立即返回**模型：工具调用负责“发起动作 + 短轮询观察”，完整推进由 dsh 反复调用 `sts2_wait` / `sts2_state` 完成。
-- 插件的 autoplay 循环在游戏可行动、agent 空闲且状态 token 变化时，向 agent 排队一条续玩消息，形成自动对局。
+- **只监听** `IPAddress.Loopback`（`AgentBridgeServer.cs:30`）。桥接线程只做 socket I/O、等待与 JSON；任何触碰游戏对象的操作都经 `MainThread.Invoke`。
+- **看门狗**：`AgentBridgeService.EnsureAttached` 在 `NGamePatch` 里往 `NGame` 根挂 `AgentBridgeSupervisor`（`NGamePatch.cs:176`），后者每 1 秒调一次 `SuperviseTick`（`AgentBridgeSupervisor.cs:11`）。
+- **重启判据**是设置指纹 `{enabled}|{port}|{token}|{allowActions}`；指纹不变就立即返回（`AgentBridgeService.cs:170`）。端口 `Math.Clamp(settings.AgentBridgePort, 1024, 65535)`。
+- **启动守卫**：`enabled && NGame.Instance == null` 时不启动，记 `The game is not ready yet.`（`AgentBridgeService.cs:182`）——否则桥接线程会在 `MainThread` 捕获上下文之前碰到游戏代码。
+- `Restart()` 清指纹重跑一次（设置页「重启」按钮）；`_ExitTree` 调 `Shutdown()`。
+- **客户端计数**：`SuperviseTick` 第一件事是 `NotifyClientCount()`（早于指纹短路），数量变化时在主线程触发 `ClientCountChanged`（聊天标题栏 dsh 徽标靠它）。数量降到 0 时立刻 `AgentDecisionBroker.Abort` + `AgentChatRelay.AbortPending`（`AgentBridgeService.cs:113`）。
+- **活动打点**：每个请求 `BeginClientRequest/EndClientRequest` 刷新 `ClientIdleSeconds`；正在走的 `sts2_wait` 也算活着（in-flight 时返回 0）。`sts2_takeover`/`sts2_chat_poll`/`sts2_chat_send` 是**被动调用，不打点**（`AgentBridgeServer.cs:161`），否则轮询会让"静默回退"永不触发。
 
-## 4. 游戏侧桥接协议
+## 3. 线协议
 
-TCP + UTF-8 行分隔 JSON。每行一个请求，服务器每行一个响应。
-
-请求：
+TCP + UTF-8 行分隔 JSON，一行一个请求，一行一个响应。
 
 ```json
 {"id": 7, "token": "<可选>", "call": "sts2_play_card", "args": {"card": "0", "target": "0"}}
-```
-
-响应：
-
-```json
 {"id": 7, "ok": true, "result": {"text": "{\"phase\":\"combat\",...}"}}
-```
-
-错误：
-
-```json
 {"id": 7, "ok": false, "error": "No run in progress."}
 ```
 
-约定：
+- 配了 token 时每个请求都要带，否则 `Unauthorized.`；单行上限 1 MB，超长/非法 JSON 回 `ok:false` 并继续服务（`AgentBridgeServer.cs:15,144`）。
+- `result` 可带 `image`（base64）+ `mimeType`，仅截图用。
+- **串行/并发**：动作工具过 `SemaphoreSlim(1)`（`AgentToolExecutor.cs:29`），只读工具与 `wait` 可并发。同一连接内多个请求并行处理，写回由 `SemaphoreSlim` 串行。
+- **`sts2_hello`** 返回：`name`（`"sts2-agent-bridge"`）、`bridge_version`、`allow_actions`、`agent_driving`、`chat`、`port`、`instructions`（一段自述用法）。
+  > 修正：旧文档写 `{name, bridge_version, game_version, allow_actions, port}`；实际**没有** `game_version`，多了 `agent_driving/chat/instructions`（`AgentToolExecutor.cs:94`）。
+- **动作工具的等待**：默认 `wait=true`，即动作发起后桥接线程阻塞到"再次可行动且 token 变化"（`wait_seconds` 默认 20，0..50）；`wait=false` 只做短观察（`ObserveMs`：出牌 700ms、默认 900ms）后返回快照。
+- `detail=delta` 时 `sts2_state` / `sts2_wait` 只返回与上次相比变化的顶层字段：`{changed:[...], delta:{...}, token, phase, actionable, blocked_by}`。
 
-- `call = "sts2_hello"` 返回 `{name, bridge_version, game_version, allow_actions, port}`，用于连接自检。
-- `call = "sts2_takeover"` 是“邀请”轮询（见 6.5）：成功认领时返回
-  `{take:true, run_token, prompt, workspace, host, port, character}`，否则 `{take:false, reason}`
-  （`disabled | read_only | no_ai_teammate | warmup | already_driving | claimed | exhausted`）。
-  这个调用**不计入** dsh 活动时间，否则 4 秒一次的轮询会让“静默回退”永不触发。
-- 设置里配置了 token 时，每个请求必须带 `token`，否则 `ok:false`。
-- 单条请求上限 1 MB；非法 JSON 返回 `ok:false` 并继续服务。
-- 动作工具在游戏侧串行执行（`SemaphoreSlim(1)`）；只读/等待工具可并发。
-- 客户端断开时取消进行中的 `sts2_wait`。
+## 4. 快照契约
 
-## 5. 状态快照（`AgentSnapshot`）
+`sts2_state` / `sts2_wait` / 动作工具的返回值都是同一份 JSON。
 
-每个工具结果都带同一套 JSON；`sts2_state` 直接返回它，动作工具返回“动作结果 + 最新快照”。
+| 字段 | 含义 |
+|---|---|
+| `schema` | 固定 `1` |
+| `token` | 状态指纹：把整份快照剔除所有 `age_seconds` 后序列化，取 SHA-256 前 8 个十六进制字符（小写） |
+| `phase` | 见下表 |
+| `actionable` | 现在是否轮到本地/AI 玩家，且允许外部 Agent 操作 |
+| `blocked_by` | `multiplayer` 之外的原因串：`paused` / `loading` / `enemy_turn` / `turn_ending` / `ai_busy` / `actions_disabled` / `no_local_player` / `screen:<Type>` / `rest_not_ready` … |
+| `mode` | `NetGameType` 名字（`Singleplayer` / `Host` / `Client` …） |
+| `controlled` | `{kind:"local",name,net_id}` 或 `{kind:"ai",name,character_id,net_id,solo_climb}` |
+| `run` / `combat` / `map` / `menu` / `options` / `notes` / `last_action` | 局面各段，见下 |
+| `chat` | `{capable,unread,pending[],recent[]}` |
+| `ai_name` / `ai_nickname` / `ai_notes` | AI 显示名、配置昵称、本局笔记（`sts2_note`） |
+| `decision` / `last_decision` | 挂起决策 / 上一份决策的校验反馈 |
+| `wait_timed_out` | 仅 `sts2_wait` 超时时为 true |
 
-```jsonc
-{
-  "schema": 1,
-  "token": "9f2c1a7b",            // 状态指纹；喂给 sts2_wait 判断“局面变了没”
-  "phase": "combat",               // 见下表
-  "actionable": true,              // 现在是否轮到本地玩家、且允许外部 Agent 操作
-  "blocked_by": "",                // multiplayer | solo_climb | enemy_turn | screen:<Type> | no_run ...
-  "mode": "Singleplayer",
-  "run": {
-    "act": 1, "act_name": "Overgrowth", "floor": 6, "ascension": 0,
-    "character": "Ironclad", "hp": 61, "max_hp": 80, "gold": 142,
-    "deck_size": 16, "relics": [{"name":"Burning Blood","id":"BurningBlood"}],
-    "potions": [{"name":"Fire Potion","id":"FirePotion"}],
-    "room": "Monster", "map_row": 4, "map_col": 2
-  },
-  "combat": {
-    "round": 3, "side": "Player",
-    "player": { "hp": 61, "max_hp": 80, "block": 5, "energy": 3, "max_energy": 3,
-                "stars": 0, "powers": [{"name":"Strength","id":"Strength","amount":2}] },
-    "hand": [
-      { "index": 0, "name": "Strike", "id": "Strike", "cost": 1, "star_cost": 0,
-        "type": "Attack", "upgraded": false, "playable": true, "needs_target": true,
-        "description": "造成 6 点伤害。" }
-    ],
-    "enemies": [
-      { "index": 0, "name": "Jaw Worm", "id": "JawWorm", "hp": 40, "max_hp": 44,
-        "block": 5, "powers": [{"name":"力量","id":"Strength","amount":3}],
-        "alive": true, "intent": "伤害11" }
-    ],
-    "piles": { "draw": 12, "discard": 3, "exhaust": 0, "play": 0 }
-  },
-  "options": [
-    { "index": 0, "kind": "card", "label": "Strike(1费)", "detail": "造成 6 点伤害。", "playable": true }
-  ],
-  "notes": [
-    "It is your turn. Use sts2_play_card with card=<index or name>, then sts2_end_turn."
-  ],
-  "last_action": { "tool": "sts2_play_card", "ok": true, "detail": "打出 [Strike] → Jaw Worm" }
-}
-```
+**token 的稳定性**：哈希前必须剔除一切自走字段（当前是所有 `age_seconds`，含 `decision.age_seconds`、`chat.pending[].age_seconds`、`last_decision.age_seconds`），否则 token 每 0.1 秒抖一次，`sts2_wait` 会立刻返回（`AgentSnapshot.cs:127-137`）。`sts2_wait` 的唤醒条件是 `actionable && token != after_token`。
 
-### phase 一览
+### 4.1 phase 一览
 
 | phase | 来源 | 可用动作 |
 |---|---|---|
-| `menu` | 没有进行中的存档时的主菜单/子菜单（`menu.screen` 区分 `main` / `solo` / `multiplayer` / `host` / `join_friend` / …） | `choose`（按下枚举出的菜单按钮）；`sts2_start_run` / `sts2_host` / `sts2_continue_run`（仅主菜单根）；`proceed` 返回上一层 |
-| `char_select` | 角色选择大厅（单人角色选择或标准多人房的房主/客户端） | `choose`（角色头像、`ai_join`/`ai_remove`、Embark）、`proceed`（返回）；`menu.lobby` 给出玩家/就绪/`can_begin` |
-| `daily_lobby` | 每日大厅（`NDailyRunScreen`，含服务器时间加载期） | `choose`（Embark/Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` / `daily_time` |
-| `custom_lobby` | 自定模式大厅（`NCustomRunScreen`） | `choose`（角色、词条勾选、Embark、Back）、`proceed`；`menu.lobby` 带 `seed` / `ascension` |
-| `ai_decision` | 有决策挂在 `AgentDecisionBroker` 上（AI 玩家的决策，或本地玩家的 `kind=hand_select` 选牌，或单人局 AI 的 `kind=card_selection` 药水/牌堆选牌） | `sts2_decide`（`decision` 里带 prompt/options 与期望 JSON）；`combat` 段是实时局面 |
-| `ai_busy` | AI 正在执行上一条决策（出牌/结算房间） | 无；`sts2_wait` 等下一个决策，`sts2_state.combat` 可看实时手牌/抽到的牌 |
-| `paused` | 暂停菜单（capstone submenu）打开 | `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon` |
-| `combat` | `CombatManager.IsInProgress` | `play_card` / `use_potion` / `discard_potion` / `end_turn` |
-| `map` | `NMapScreen.IsOpen` | `choose`；另带 `map` 字段=全幕路线图（与内置 AI 同一份文本） |
-| `rewards` | `NRewardsScreen` overlay | `choose`（领取）/ `proceed` |
-| `card_reward` | `NCardRewardSelectionScreen` | `choose`（选牌/跳过 alternative） |
+| `menu` | 主菜单/子菜单（`menu.screen` 区分 `main/solo/multiplayer/host/join_friend/other`） | `choose`（按下枚举按钮）、`proceed`（返回上层）；开局/建房/续档仅在主菜单根 |
+| `char_select` | 角色选择大厅（单人角色选择、标准多人房） | `choose`（角色头像、`ai_join`/`ai_remove`、Embark）、`proceed` |
+| `daily_lobby` / `custom_lobby` | `NDailyRunScreen` / `NCustomRunScreen` | `choose`（Embark/Back、`ai_character`、`modifier`）、`proceed` |
+| `dread_lobby` / `blitz_lobby` | 0.113.1+ 的 `NDreadScreen` / `NBlitzScreen`，按类型名反射识别 | 同上（`menu.lobby.ascension`：Dread 固定 10、Blitz 取上限） |
+| `ai_decision` | 经纪上挂着决策（AI 决策、local 的 `hand_select`、单人局 AI 的 `card_selection`） | `sts2_decide`；`combat` 段是实时局面 |
+| `ai_busy` | AI 正在执行上一条决策 | 无——`sts2_wait` 等下一个决策，`combat` 段可看实时手牌 |
+| `paused` | 暂停菜单（capstone submenu，**不在** overlay 栈，需单独识别） | `sts2_resume` / `sts2_save` / `sts2_quit_to_menu` / `sts2_abandon` |
+| `combat` | `CombatManager` 进行中 | `play_card`/`play_cards`/`use_potion`/`discard_potion`/`end_turn` |
+| `map` | `NMapScreen.IsOpen` | `choose`（另带 `map` 全幕文本） |
+| `rewards` | `NRewardsScreen` | `choose` / `claim_rewards` / `proceed` |
+| `card_reward` | `NCardRewardSelectionScreen` | `choose`（含 `skip`：按 alternative/skip 按钮） |
 | `card_select` | `NCardGridSelectionScreen` 家族 | `select_cards`；单选屏也可 `choose` |
 | `card_choice` | `NChooseACardSelectionScreen` | `choose` / `proceed`（跳过） |
-| `bundle_select` | `NChooseABundleSelectionScreen` | `choose`（选包/确认/返回） |
-| `crystal_sphere` | `NCrystalSphereScreen`（水晶球小游戏） | `choose`（占卜格子/切工具）/ `proceed` |
 | `relic_select` | `NChooseARelicSelection` | `choose` / `proceed`（跳过） |
-| `shop` | `NMerchantRoom` | `choose`（购买）/ `proceed`（关货架/离开） |
-| `rest` | `NRestSiteRoom` | `choose` |
-| `target_select` | `NTargetManager.IsInSelection`（休息处 MEND、部分药水/遗物） | `choose`（选中目标；最后一个索引=取消） |
-| `event` | 事件房间 | `choose` / `proceed`（继续页） |
-| `treasure` | 宝箱房间 | `proceed`（开箱） |
+| `rune_select` | HextechRunes（ARAM: Mayhem）符文选择，纯反射驱动 | `choose`（`PresenterChoose` 立即生效）；无候选时最后一个 `proceed` 选项=确认 |
+| `target_select` | `NTargetManager.IsInSelection`（休息处 MEND、部分药水/遗物） | `choose`（最后一个索引=取消） |
+| `rest` | `NRestSiteRoom` | `choose`（选项用尽后退化为 `room_proceed`） |
+| `shop` | `NMerchantRoom` | `choose` / `proceed`（关货架/离开） |
+| `event` | 事件房间 | `choose` / `proceed`（对话/继续页） |
+| `bundle_select` | `NChooseABundleSelectionScreen` | `choose`（选包/确认/取消）/ `proceed` |
+| `crystal_sphere` | `NCrystalSphereScreen` | `choose`（占卜格子/切工具）/ `proceed` |
+| `treasure` / `treasure_relic` | 宝箱房间 / 宝箱遗物选择 | `proceed`（开箱）/ `choose` |
 | `room_proceed` | 其他房间，只剩 proceed | `proceed` |
 | `game_over` | `NGameOverScreen` | `proceed` |
-| `unsupported` | 未识别 overlay | —（提示玩家手动处理） |
-| `idle` | 加载、动画、敌方回合等 | —（用 `wait`） |
+| `unsupported` | 未识别 overlay，`blocked_by=screen:<Type>` | 无（提示人工处理） |
+| `idle` | 加载/动画/敌方回合/无本地玩家 | `sts2_wait` |
 
-`actionable` 为 `false` 时，`blocked_by` + `notes` 说明原因。`sts2_wait` 按 `actionable && token != after_token` 唤醒。
+> 修正：旧表缺 `rune_select` 与 `treasure_relic`（`AgentSnapshot.cs:866,1312`）。
 
-### 主菜单 / 大厅（v2.4）
+### 4.2 options 与索引
 
-`phase=menu|char_select|daily_lobby|custom_lobby` 时快照带 `menu` 对象：
+`options[]` 是**当前界面重新枚举**出来的可点列表，元素统一 `{index, kind, label, ...}`；动作工具只接受这里的 `index`，越界返回错误 + 最新快照。
 
-```jsonc
-"menu": {
-  "screen": "main",                 // main | solo | multiplayer | host | join_friend | char_select | daily_lobby | custom_lobby | other
-  "title": "Main menu",
-  "depth": 0,
-  "can_start_run": true, "can_start_daily": true, "can_start_custom": true,
-  "can_continue": false, "max_ascension": 10, "save": "no saved run",
-  "characters": [{"id":"IRONCLAD","name":"铁甲战士"}],
-  "modes": ["standard","daily","custom"],
-  "modifiers": [{"id":"Draft","name":"牌组草案","kind":"good"}],
-  "lobby": {                        // 仅 char_select / daily_lobby / custom_lobby
-    "mode": "Daily", "host": true, "singleplayer": false,
-    "players": [{"name":"你","character":"铁甲战士","character_id":"IRONCLAD","ready":true,"is_ai":false,"is_local":true}],
-    "local": {"name":"你","character":"铁甲战士","character_id":"IRONCLAD","ready":true},
-    "ai_in_lobby": true, "can_begin": true,
-    "ascension": 4, "seed": "DD_MM_YYYY_2P", "daily_time": "2026-11-01T03:10:00+00:00"
-  }
-}
-```
-
-`options[]` 就是可点列表（`index` 与 `sts2_choose` 一致），元素统一是 `{index, kind, id, label, enabled}`，`kind=modifier` 额外带 `ticked`：
-
-| kind | 含义 | `sts2_choose` 的效果 |
+| kind 组 | 具体值 | `sts2_choose` 的效果 |
 |---|---|---|
-| `button` | 菜单/子菜单按钮、Embark/Back、角色选择的普通按钮 | `ForceClick()` / `BaseButton.Pressed` |
-| `character` | 角色选择头像（`NCharacterSelectButton`） | `Select()`，等价点选该角色 |
-| `ai_character` | 每日/自定义大厅 AI 角色面板里的头像（`id=ai:<charId>`，`label=AI 选 X`） | `Select()`，把 AI 队友换成该角色（面板随后关闭） |
-| `modifier` | 自定模式词条勾选框（`NTickbox`） | 切换勾选 |
-| `ai_join` | 角色选择界面的「添加 AI 队友并准备」 | `AddAiToLobby` + `SetAiReady(true)` |
-| `ai_remove` | 移除大厅里的 AI 队友 | `RemoveAiFromLobby` |
+| 菜单/大厅 | `button` `character` `ai_character` `modifier` `ai_join` `ai_remove` | 按按钮 / 选角色 / 给 AI 换角色 / 切换词条勾选 / 加 AI 并准备 / 移除 AI |
+| 战斗 | `card` | 仅 `kind=local` 时有意义（AI 模式 `options` 为空，用 `sts2_decide`） |
+| 地图 | `map_node` | `OnMapPointSelectedLocally` |
+| 奖励 | `card_reward` `alternative` `<RewardTypeName>` | 选牌 / 跳过按钮 / 领取 |
+| 选牌屏 | `card_select` `card_choice` `relic` `rune` `bundle` `bundle_confirm` `bundle_cancel` `crystal_cell` `crystal_tool` | 选择 / 跳过 / 领取 / 选符文 / 选包 / 关水晶球 |
+| 事件/篝火/商店 | `event_option` `dialogue` `proceed`、篝火 option id、商店 entry 类型名 | 选项 / 推进对话 / 继续 / 购买 |
+| 目标 | 候选者 `kind` + 末尾 `cancel` | hover 后完成选择；`cancel` 等价点取消 |
 
-每日/自定义大厅没有原生角色选择器，模组在两个界面各挂一张「AI 队友」卡片：先按卡片的「更换角色」按钮，`ai_character` 选项才会出现（`ai_character` 与大厅自身的 `character` 分开，避免和自定模式自己的角色头像撞 id）。选中的角色会写进 `AiSettings.AiLobbyCharacterId`，下次建大厅沿用。
+索引排序：地图按 `MapCoord`；奖励按钮/卡牌 holder/遗物 holder 按 UI 树顺序；商店按 `MerchantInventory.AllEntries` 过滤后顺序；事件/篝火按同步器顺序。
 
-`options` 在每次动作时按当前界面重新枚举；越界会返回错误，dsh 重新 `sts2_state` 即可。主菜单根之外的界面不能用 `sts2_start_run` / `sts2_host` / `sts2_continue_run`（会提示先 `sts2_proceed`）。
+### 4.3 `map` 段
 
-### 选项索引
+`phase=map` 时顶层多一个 `map` 字符串，内容即内置 AI 选路看到的 `ContextBuilder.DescribeMap` 文本（整幕节点类型、分叉、已访问标记、Boss 行），有长度软上限；要看同一份数据的工具版用 `sts2_read subject=map`。`options` 仍然只是本回合可点的节点，`map` 仅用于规划。
 
-- `options[].index` 是**当前界面内**的稳定序号；动作工具只接受这个序号。
-- 索引在每次动作时重新枚举，越界会返回错误和最新快照，让 dsh 自行纠正。
-- 地图节点按 `MapCoord` 排序；奖励按钮/卡牌 holder/遗物 holder 按 UI 树顺序；商店按 `MerchantInventory.AllEntries` 过滤后的顺序；事件/篝火按同步器顺序。
+### 4.4 `menu` / 大厅段
 
-### `map` 阶段的全幕路线图
+`menu` 带 `screen`、`title`、`depth`、`can_start_run`/`can_start_daily`/`can_start_custom`/`can_continue`、`max_ascension`、`characters[]`、`modes[]`、`host_modes[]`、`modifiers[]`（`{id,name,kind}`）；大厅类 phase 还带 `menu.lobby`：`mode`/`host`/`singleplayer`/`players[]`（名字、角色、ready、`is_ai`、`is_local`）/`local`/`ai_in_lobby`/`can_begin`/`ascension`/`seed`/`daily_time`。有 `NModalContainer` 弹窗时 `actionable=false`、`blocked_by=modal` 并在 `notes` 点名类型。
 
-`phase=map` 时快照多一个顶层字段 `map`（字符串），内容就是内置 AI 选路时看到的那段文本 —— `ContextBuilder.DescribeMap` 的原文，两边不会漂移：
+### 4.5 `chat` 段
 
-```
-第1幕地图 | 已访问5个节点
-当前位置: 战斗(第5行,第3列)
-可前往: 战斗(第6行,第2列)、商店(第6行,第4列)
-Boss: Boss(第16行,第3列)
-路线图（行: 节点[类型] -> 后续节点坐标）:
-第0行: (3,0)远古 ...
-第4行: (2,4)战斗√(3,5) (3,4)未知->(4,5)
-...
-```
+`{capable, unread, pending[], recent[]}`：`capable`=`AgentChatRelay.ShouldRelay`；`pending` 最多 5 条未回复玩家发言，带 `seq`（`sts2_chat_send.reply_to` 要用的就是它）与 `age_seconds`；`recent` 是最近 4 条普通聊天（`from/text/ai`）。存在未读时 `notes` 直接指向 `chat.pending`。
 
-所以 dsh 的地图决策不再是“只有下一行能选的几个点”，而是能看到整幕（约 13–16 行 + Boss 行）的节点类型、分叉关系与已访问标记，可以像内置 AI 一样提前几步规划路线。限制也一致：文本有 3200 字符软上限（超了截断末尾几行），且 Boss/精英只给类型不给具体身份。想看同一份数据的工具版可调 `sts2_read subject=map`（`read_map`，另有 4000 字符截断）。
+### 4.6 `combat` 段
 
-`options` 仍然是**本回合可以点的**节点（`NMapPoint.IsEnabled && State==Travelable`），`sts2_choose index=<n>` 只接受这些序号；`map` 只用于规划，不是选项列表。
+`round`/`side`、`player`（`hp/max_hp/block/energy/max_energy/stars/powers[]`）、`hand[]`（`index/name/id/cost`(当前实际费用)`/star_cost/type/upgraded/playable/needs_target/description`）、`enemies[]`（`index/label/hp/max_hp/block/powers/alive/intent`，死亡敌人保留为 `alive:false`）、`piles`（draw/discard/exhaust/play 张数）。AI 模式（`ai_decision`/`ai_busy`）同样带此段，但 `options` 为空——抽到的新牌必须先让 dsh 看见。
 
-## 6. dsh 插件
+## 5. 动作工具
 
-插件**独立发布**：npm 包 `dsh-sts2`，源码在单独的 GitHub 仓库（`YuWan886/dsh-sts2`），不随 Mod 打包。
-
-### 6.1 形态
-
-一个标准 dsh **组合包（bundle）**，仓库结构：
-
-```
-dsh-sts2/                       # 独立 GitHub 仓库
-├── package.json                # name: dsh-sts2, dsh.bundle.patch, peerDependencies
-├── cordis.patch.yml            # 插入插件行，带默认 host/port
-├── index.js                    # 工具注册 + autoplay
-├── lib/bridge.js               # 无依赖的 TCP 行 JSON 客户端（可单测）
-├── test/protocol.test.mjs      # node:test 协议测试
-├── README.md
-└── .github/workflows/publish.yml  # tag 触发 npm publish
-```
-
-插件入口：
-
-```js
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-
-export const name = 'sts2'
-export const inject = ['tools']
-export const Config = Schema.object({
-  host: Schema.string().default('127.0.0.1'),
-  port: Schema.number().default(26333),
-  token: Schema.string().default(''),
-  autoPlayPollMs: Schema.number().default(700),
-})
-export function apply(ctx, config) { /* 注册工具 + 连接 + autoplay */ }
-```
-
-依赖声明遵循 dsh 插件约定：`@deepseek-ai/dsh-tools` / `@deepseek-ai/dsh-llm` 同时放进 `peerDependencies` 与 `devDependencies`，运行时使用 dsh 安装中的副本。
-
-### 6.2 工具
-
-工具直接注册为原生名（无 `mcp__` 前缀）：
-
-| 工具 | 参数 | 说明 |
+| 工具 | 参数 | 语义要点 |
 |---|---|---|
-| `sts2_status` | `{}` | 连接自检：`sts2_hello` + 一次快照，返回 CONNECTED / NOT CONNECTED 与排查清单 |
-| `sts2_state` | `{detail?}` | 完整快照；`detail=delta` 只返回与上次快照相比变化的顶层字段（`changed` / `delta`） |
-| `sts2_wait` | `{after_token?, timeout_seconds?, detail?}` | 长轮询到可行动或状态变化；默认 25s，最大 50s；`detail=delta` 支持增量返回 |
-| `sts2_read` | `{subject, pile?, card?, player?, detail?}` | 深读（复用 `AiToolRunner`） |
-| `sts2_note` | `{text}` | **v2.4**：记录本局长期笔记（构筑方向、Boss 对策、想买的遗物等），按运行种子保存到 `user://ai_teammate/agent/agent_notes.json`，后续决策提示词注入 `[AI 笔记]`、快照带 `ai_notes`；换局自动清空 |
-| `sts2_set_nickname` | `{name}` | 修改 AI 队友显示昵称（≤24 字；空字符串恢复人格名）；名牌、聊天、提示词与联机客户端同步，只读模式也可用 |
-| `sts2_screenshot` | `{}` | 截图，原生 image content |
-| `sts2_decide` | `{decision}` | **v2**：回答 `phase=ai_decision` 里的挂起决策；内容是 prompt 要求的 JSON（对象或字符串均可） |
-| `sts2_chat_poll` | `{after_seq?, wait_seconds?}` | **v2.3**：长轮询玩家聊天（默认等 15s、上限 25s）。返回 `seq` 与 `messages[{seq,from,text,kind,at}]`；无消息时 `wait_timed_out=true`。**插件内部调用，不注册为 dsh 工具**（模型改看快照的 `chat.pending`） |
-| `sts2_chat_send` | `{text, reply_to?, directives?, nickname?}` | **v2.3**：在聊天面板发言；`reply_to` 必须是 `chat.pending` / `<sts2_chat>` 里仍在等待的 seq（否则拒绝并回传待回复列表；内置模型已补答的 seq 仍接受为迟到回复），`directives` 记录战术，`nickname` 改显示名 |
-| `sts2_start_run` | `{mode?, character?, ascension?, seed?, modifiers?}` | **v2.4**：从主菜单根开一局新的单人游戏。`mode=standard`（默认）/`custom`（自带种子、进阶、角色与词条）/`daily`（时间服务器日期 + `dd_MM_yyyy_1p` 种子 + 按游戏规则摇出的角色/进阶/2 好 1 坏词条；忽略其它参数）。词条用 `state.menu.modifiers` 里的 id 或名称 |
-| `sts2_host` | `{mode?}` | **v2.4**：从主菜单根程序化建多人房（`standard` / `daily` / `custom`）。每日/自定大厅自动加入并准备 AI 队友；标准大厅用角色选择界面的 `ai_join` 选项。建好后快照进入 `char_select` / `daily_lobby` / `custom_lobby` |
-| `sts2_continue_run` | `{}` | **v2**：读取存档继续（同样要求主菜单根） |
-| `sts2_pause` | `{}` | 打开暂停菜单（`NPauseMenu`）；单人爬塔/AI 队友模式下同时挂起自动化。快照变为 `phase=paused`、不可行动 |
-| `sts2_resume` | `{}` | 关闭暂停菜单并解除自动化挂起 |
-| `sts2_save` | `{}` | 立即写盘当前存档（单人/主机；客户端会被拒绝）。游戏平时在检查点自动存档 |
-| `sts2_quit_to_menu` | `{}` | 存档并返回主菜单（等价暂停菜单的 Save and Quit） |
-| `sts2_abandon` | `{}` | 放弃当前局并返回主菜单（会删除当前存档）；只允许单人/主机，客户端会被拒绝 |
-| `sts2_play_card` | `{card, target?}` | 出牌；`card` 为手牌索引或卡名（`controlled.kind=local` 时可用）。走 `CardModel.TryManualPlay`＝手牌 UI 的同一条路（`PlayCardAction`），会正常扣能量/辉星并触发「打出一张牌」钩子；`CardCmd.AutoPlay` 是「免费打出」，不扣费，不能用于这里 |
-| `sts2_use_potion` | `{potion, target?}` | 用药水；`AnyTime` 药水在战斗外也能用 |
-| `sts2_discard_potion` | `{potion}` | **v2**：丢弃药水。走联机的 `DiscardPotionGameAction`（与药水栏 UI 同一条路），不再直接改本地 `potion.Discard()`——后者在多人客户端只改本机，会跟主机分叉 |
-| `sts2_end_turn` | `{}` | 结束回合。走联机的 `EndPlayerTurnAction`（`ActionQueueSynchronizer.RequestEnqueue`，和结束回合按钮一致）；已经 ready 时只回报"等待其他玩家"，绝不反向撤销。**不要**直接调 `CombatManager.SetReadyToEndTurn`：那只会改本机的 ready 标记，多人客户端会在主机不知情的情况下独自进入回合结束阶段一，随后主机的"撤销结束回合"无法应用 → `StateDivergence` 掉线 |
-| `sts2_choose` | `{index, skip?}` | 地图/奖励/卡牌奖励/篝火/事件/商店/遗物/选包/水晶球/选目标；**v2.4** 也按下主菜单/大厅里的按钮、角色头像、自定词条勾选与 `ai_join` |
-| `sts2_select_cards` | `{indices}` | `NCardGridSelectionScreen` 家族多选 |
-| `sts2_proceed` | `{}` | 继续/离开/开箱/结束界面/确认选包/关闭水晶球；**v2.4** 也从当前菜单/大厅返回上一层 |
-| `sts2_autoplay` | `{enabled}` | 开关自动续玩（纯插件侧，不访问游戏） |
+| `sts2_state` | `{detail?}` | 完整快照；`detail=delta` 见 3 节 |
+| `sts2_wait` | `{after_token?, timeout_seconds?, detail?}` | 阻塞到可行动且 token 变化；timeout 默认 25、clamp 1..50；超时回 `wait_timed_out` |
+| `sts2_play_card` | `{card, target?, wait?, wait_seconds?}` | `card` 为手牌索引或卡名。走 `CardModel.TryManualPlay`（=手牌 UI，`PlayCardAction`，正常扣能量/辉星并触发"打出一张牌"钩子）；`CardCmd.AutoPlay` 是"免费打出"，**绝不能**用于这里 |
+| `sts2_play_cards` | `{cards[], end_turn?, wait?, wait_seconds?}` | 一次调用打完整个回合：按序解析手牌、逐步重取快照；遇到非 combat 界面（选牌）或 `actionable=false` 立刻停并在 `steps[]` 说明；`end_turn` 只在无失败/无中断时附加 |
+| `sts2_use_potion` | `{potion, target?}` | `UsePotionAction` + `RequestEnqueue`；`AnyTime` 药水战斗外可用，`CombatOnly` 不行 |
+| `sts2_discard_potion` | `{potion}` | `DiscardPotionGameAction`（与药水栏 UI 同一条路）；直接 `potion.Discard()` 只改本机、会分叉 |
+| `sts2_end_turn` | `{}` | `EndPlayerTurnAction` 经 `ActionQueueSynchronizer.RequestEnqueue`；已 ready 时只回报"等待其他玩家"，绝不反向撤销。**不要**直接调 `SetReadyToEndTurn` |
+| `sts2_choose` | `{index, skip?}` | 地图/奖励/选牌奖励/选牌/篝火/事件/商店/遗物/选包/水晶球/目标/符文/**主菜单与大厅** |
+| `sts2_select_cards` | `{indices[]}` | `NCardGridSelectionScreen` 多选；校验屏幕自己的 `min..max`，再通过 `_completionSource` 交回 |
+| `sts2_proceed` | `{}` | 继续/离开奖励/跳过/开箱/结束界面/确认选包/关水晶球；菜单类 phase 等价"返回上一层" |
+| `sts2_claim_rewards` | `{}` | 一键领取不需要决策的奖励（最多 12 轮），遇到 `kind` 含 `CardReward` 的选项即停，留给 `choose` |
+| `sts2_decide` | `{decision}` | 回答 `phase=ai_decision`；对象或字符串都收，字符串里允许 Markdown 围栏；必须是含 `actions/end_turn/choice/choices/indices/index/upgrade_indices/thinking/reason/chat_message/deferred_actions/reroll` 之一的 JSON 对象 |
+| `sts2_start_run` | `{mode?, character?, ascension?, seed?, modifiers?}` | `standard`/`daily`/`custom`。要求无进行中的局且处于主菜单根；`daily` 忽略其它参数（时间服务器日期 + `dd_MM_yyyy_1p` 种子 + 按游戏规则摇角色/进阶/2 好 1 坏）；`dread`/`blitz` 被明确拒绝并提示改用 `sts2_host` |
+| `sts2_host` | `{mode?}` | 干净主菜单根上 `FastHost` 建多人房：`standard`/`daily`/`custom`/`dread`/`blitz`（后两者需 0.113.1+）。非标准局大厅自动加入并准备 AI 队友；标准大厅用角色选择的 `ai_join` |
+| `sts2_continue_run` | `{}` | 读档续玩（同样要求主菜单根） |
+| `sts2_pause` / `sts2_resume` | `{}` | 开关暂停菜单；单人爬塔时同时 `AiFlowControl.SetManualPaused` 挂起自动化。暂停期间快照 `phase=paused`、不可行动 |
+| `sts2_save` | `{}` | 立即写盘；仅单人/房主，客户端被拒 |
+| `sts2_quit_to_menu` | `{}` | 先 `SaveRun` 再 `NGame.ReturnToMainMenu` |
+| `sts2_abandon` | `{}` | 仅单人/房主；`RunManager.Abandon()` |
+| `sts2_quit_app` | `{}` | `NGame.Instance.Quit()`，让游戏自己退（管理员权限下外部杀进程会被拒，自动化测试用它收尾） |
+| `sts2_read` | `{subject, pile?, card?, player?, detail?}` | 深读，复用 `AiToolRunner`：`pile/relics/potions/player/run/map/deck_stats/card` |
+| `sts2_note` | `{text}` | 本局长期笔记：≤20 条、每条 ≤300 字、去重；写 `user://…/agent/agent_notes.json` 并按运行种子归属，换局自动清空；每条决策提示词会带 `[AI 笔记]`，快照带 `ai_notes` |
+| `sts2_set_nickname` | `{name}` | `AiNames.SetNickname`；空串恢复人格名；只读模式也可用 |
+| `sts2_screenshot` | `{}` | `ScreenshotTool.Capture`，返回 base64 image；需设置里打开 `EnableScreenshotTool` |
+| `sts2_chat_poll` | `{after_seq?, wait_seconds?}` | 长轮询玩家聊天（默认 15s、上限 25s）：`{seq, messages[{seq,from,text,kind,at}], wait_timed_out?}`。**插件内部方法，不注册给模型** |
+| `sts2_chat_send` | `{text, reply_to?, directives?, nickname?}` | 在聊天面板发言，见第 8 节 |
+| `sts2_hello` / `sts2_takeover` | `{}` | 自检 / 自动接管邀请，见 3、9 节 |
 
-工具描述里写清楚当前 phase 对应的用法，模型无需额外学习提示词。
+插件侧另有 `sts2_status`（hello + 一次快照的连接自检）与 `sts2_autoplay`（纯插件定时器，不访问游戏），它们不是游戏侧 call。
 
-### 6.3 autoplay（真正的“接管”）
+## 6. 决策经纪（dsh 当 AI 的大脑）
 
-`sts2_autoplay {enabled:true}` 时，插件记录调用它的 agent（`exec.agent`），并启动一个 effect 管理的定时器：
+- **唯一拦截点** `DecisionService.RequestWithToolsAsync`：命中 `AgentDecisionBroker.Enabled`（=`AgentBridgeService.ExternalAgentDriving`）时不再请求 LLM 后端，而是把 prompt 挂起等 `sts2_decide`（`DecisionService.cs:156`）。dsh 的答案原样交给 `ResponseParser`，校验/兜底/执行不变。
+- **快照形态**：`decision{id,kind,player,net_id,age_seconds,max_wait_seconds,system_prompt,prompt,options,answer_with}`，选牌类额外带 `min_select/max_select/allow_empty/answer_shape`。
+- **等待预算** `AgentFallbackSeconds×3`，clamp 60..300 秒（`AgentFallbackSeconds=0` 时直接 300）。同一时刻只挂一个决策，新决策把旧的以 null resolve（`superseded` 日志）。
+- **连着 ≠ 在驱动**：`AgentDecisionBroker.AgentWatching` 要求 `Enabled` 且 `ClientIdleSeconds <= AgentFallbackSeconds`（为 0 时用 30 秒窗口）。超过窗口的决策**不挂起**，直接走自带后端（`AgentDecisionBroker.cs:172`）——dsh 恢复调用后立刻回到 dsh 手里。
+- **执行模式**：`AiTeammateManager.ExternalBrainActive` 决定"按模型原序出牌、跳过 Phase 3 清空手牌、允许更多决策轮次"。它是**全房一致项**：房主取本机 `AgentDecisionBroker.Enabled`，客户端跟随战斗计划里的 `externalBrain` 字段（`AiCombatPlanCodec`），不一致就切换（`AiTeammateManager.cs:765,805`）。两端播放顺序不同 → 弃牌堆顺序分叉 → `StateDivergence` 踢人。
+- **轮次预算**：外部大脑单回合最多 6 次决策（内置 3 次），硬超时 `330 + 90×(轮次-1)` 秒（`AiTeammateManager.cs:37,770`）；仍有能量/辉星且有可打牌才会追加下一次。内置后端 `Math.Clamp(CombatTurnBudgetSeconds,15,180)` 秒。
+- Phase 3（启发式清空剩余手牌）在 `ExternalBrainActive` 时关闭（`CombatDecisionExecutor.cs:182`），否则会花掉 dsh 还没看见的抽牌。
+- 决策返回 `tool_calls`（`read_pile`/`card_info` …）仍有效：主线程执行只读工具、结果拼进新 prompt 再挂一次决策。
+- **校验反馈**：`last_decision{id,kind,requested,dropped,resolved,valid,age_seconds}`，`resolved` 形如 `"打击->骷髅[#1]"`，对被丢弃动作在 `notes` 里提醒。
+- **人格**：`Enabled` 时 system prompt 用 `PersonalityPromptBuilder.BuildExternalAgentSystemPrompt`（`prompt.system.external_agent`），只保留 JSON/语言要求与团队协作原则，人格由 dsh 自己决定。
 
-1. 每 `autoPlayPollMs` 检查一次游戏状态（直接走桥接，不产生工具历史）。
-2. agent 处于 `idle` 且 `state.actionable === true`：
-   - 若 `token` 与上次提示不同 → `agent.followup(createUserMessage(...))` 排队一条续玩消息，消息里带紧凑状态；
-   - 若 token 相同但已空闲超过 15s → 低频率重发一次（防止模型中途停住）；
-3. 游戏进入 `game_over`、连接断开或 `sts2_autoplay {enabled:false}` → 停止。
+## 7. 手牌/选牌交由 dsh
 
-续玩消息示例：
+- 触发路径 `DshHandSelect.AppliesTo`（`RoomPatches.cs:1730`）：`AgentDecisionBroker.Enabled` && `AgentWatching` && 本局没有由 Mod 驱动的 AI 玩家 && 是本地玩家。满足时 **不** 打开 `NPlayerHand.SelectCards`（那会一直等真人点击并软锁战斗），改为挂 `kind=hand_select` 决策。
+- 决策内容：`options[{index,card,upgradable,detail}]` + `min_select/max_select/allow_empty/answer_shape`；prompt 里每张牌带费用、当前效果、「升级后: …」和**词缀/悬停侧边栏**（`PromptTextHelper.GetHoverTipText`）。回答 `{"indices":[...],"reason":"..."}`，回填走原有 `SyncLocalChoice`。
+- **区间语义**：`min==max` 正好选这么多；`min<max` 可少选（游戏确认）；`min==0` 时 `{"indices":[]}` = 不选并确认。超过 `max` 截断，少于 `min` 只补到 `min`（不再强行补到上限）。
+- **超时**：`DecisionService.OutOfCombatTimeoutMs`；无人应答回退启发式——手牌默认"删牌"启发式，药水/牌堆取牌用 `PickBestForGain`（挑最强）。
+- **多人红线**：AI 玩家自己的选牌只在单人局挂决策；多人局每个 peer 本地模拟 AI，而 `Enabled` 是本机标志，让 dsh 决定 AI 拿哪张会撕开各端牌堆，所以多人局一律跑确定性启发式。
+- `sts2_play_card`/`sts2_end_turn` 在 `NPlayerHand.IsInCardSelection` 为真时直接拒绝，要求先回答 `hand_select`。
+- `FromHandForUpgrade`、`FromChooseACardScreen`（攻击/技能/能力/无色药水、Discovery、Quasar…）、`FromCombatPile`（Droplet of Precognition、Liquid Memories、Cleanse、Headbutt…）分别走 `hand_select` / `card_selection`，`min/max` 规则相同。
+- 目标选择：`NTargetManager.IsInSelection` → `phase=target_select`，选项遵守 `NTargetManager` 自己的过滤（MEND 不能选自己），最后一个索引取消；点取消让原动作返回失败、休息处重新启用选项。
 
-```xml
-<sts2_autoplay>
-The game is waiting for you (phase: combat, token: 9f2c1a7b).
-Continue with the sts2_* tools. Current state:
-{...snapshot json...}
-</sts2_autoplay>
-```
+## 8. 聊天中继（游戏面板由 dsh 回复）
 
-由于消息来源是 `{kind:'plugin', plugin:'sts2'}`，不会和玩家自己的对话混淆；玩家随时插话会自然抢占当前回合。
+- **门槛是"观察到能力"**：`AgentChatToDsh` && `ConnectedClients>0` && 最近 10 秒内有 `sts2_chat_poll`（`AgentChatRelay.ShouldRelay`）。旧插件、没绑定对话的 dsh、桥接关闭都自动回落到内置后端。
+- 玩家发言 → `ChatManager` 记录后询问 `AgentChatRelay.TryRelay`：入队（`seq` 自增，队列 10 分钟 / 50 条上限）并**不再**请求后端，也不再触发内置 `TryAutoMessage`。
+- 注入用 dsh 的 `steer()`（next-step）而**不是** `followup()`（next-turn）：自动驾驶时一轮持续整局，`followup` 会把聊天排到该轮结束之后，玩家等不到回复、Mod 先超时补答，模型随后只能猜 `reply_to`。
+- **回复**：`sts2_chat_send {text, reply_to, directives?, nickname?}` → `ChatManager.ApplyDshReply` 渲染（面板/气泡/历史与内置后端一致），`directives`（战术记录）与 `nickname`（改显示名）副作用保留。
+- **`reply_to` 绑定**：命中仍在等待的 `seq` → 标记已回答；命中已被内置后端补答的 `seq` → 仍渲染并注明是迟到回复（玩家更想看到 dsh 的答案）；命中不存在/已清理/猜错的 `seq` → **整条拒绝**并回传仍在等待的 seq 列表；不带 `reply_to` 且只有一条待回复 → 自动绑定；多条待回复 → 按新发言发送并提示还有哪些 seq 待回。
+- **超时**：`AgentChatReplyTimeoutSeconds`（默认 120，clamp 15..600）内无回复，或客户端断开，则 `AgentChatFallbackToBackend` 打开时由内置后端补答并在面板注明。
+- `sts2_chat_poll`/`sts2_chat_send` 不计入 dsh 活动打点；只读模式下聊天中继照常工作（聊天不是游戏动作）。
 
-### 6.4 连接管理
+## 9. 自动接管邀请（`sts2_takeover`）
 
-- 插件加载约 1.5s 后主动探测一次连接（让游戏侧状态行立刻显示已连接），之后按需懒连接；游戏未开/未启用桥接时返回可操作的错误文案。
-- 断线后指数退避重连；autoplay 定时器在断开期间静默。
-- 每次请求带自增 id，按 id 关联响应；超时可取消。
-- 插件卸载时由 `ctx.effect` 关闭 socket 和定时器。
+桥接不能主动推事件，所以是**邀请 + 认领**：AI 队友入局时 `AgentTakeoverInvite.OnAiPlayerJoined` 为这局生成 `run_token` 并开窗（`AiTeammateManager.cs:282`）；插件每 4 秒轮询一次，先到先得。
 
-### 6.5 自动接管（`sts2_takeover`）
+按顺序判定，返回 `{take:false,reason}` 之一：
 
-目标：多人局一出现 AI 队友就自动开一个 dsh 对话接管，省掉“手动开对话 + 说一句来玩杀戮尖塔2”。
+| reason | 条件 |
+|---|---|
+| `settings_unavailable` / `disabled` | 设置读不到 / `AutoLaunchAgentSession` 关闭 |
+| `read_only` | `AgentBridgeAllowActions=false` |
+| `no_ai_teammate` | 本局没有 AI 队友（无 `run_token`） |
+| `warmup` | AI 入局不足 30 秒，留给玩家手动接管 |
+| `already_driving` | 最近 15 秒内有 dsh 请求 |
+| `exhausted` | 本局已认领 3 次 |
+| `run_changed` / `claimed` | 加锁后重读发现换了局 / 本局已被认领且未过期（60 秒） |
 
-桥接是被动监听、不能主动推事件，所以采用**邀请 + 认领**：
+> 修正：旧文档列了 8 个 reason，漏掉 `settings_unavailable` 与 `run_changed`（`AgentTakeoverInvite.cs:90,128`）。
 
-1. 游戏侧（`AgentTakeoverInvite`）在 AI 队友入局时开一个窗口，并每局生成 `run_token`。
-2. 插件每 `takeoverPollMs`（默认 4s）调用一次 `sts2_takeover`；游戏侧按顺序判断：
-   - 自动接管开关是否打开、是否允许操作、是否有 AI 队友；
-   - 入局是否已超过 30s（留给玩家手动接管的窗口）；
-   - 最近 15s 内有没有 dsh 请求（有 ⇒ 已经有人在驱动，不打扰）；
-   - 本局认领次数是否超限（3 次），本次认领是否还在 60s 有效期内。
-3. 通过则**认领**并返回渲染好的首条提示词与工作区；`run_token` 保证一个插件进程只为一个对局建一次会话。
-4. 插件调用 `ctx.get('sessionController').agents.createSession({cwd, reusable:()=>false})`
-   在**当前 dsh 进程里新建一个普通会话**（和 Web UI 点“新建对话”同一条路径），再把工作区注册/挂载到
-   `workspaceRegistry`，最后 `agent.followup(createUserMessage({text: prompt, source:{kind:'plugin',plugin:'sts2'}}))`。
-5. 新会话第一次调用 `sts2_*` 工具时桥接就会看到活动，游戏侧不再发邀请；玩家在 GUI 里能看、能接手打字。
+成功时返回 `{take:true, run_token, character, prompt, workspace, host:"127.0.0.1", port}`，插件据此在当前 dsh 进程里新建普通会话并 `followup` 首条消息；首条消息由 `AgentLaunchPrompt` 模板渲染（占位符 `{Host}/{Port}/{Token}/{Workspace}/{Character}`，空模板用 `DefaultPrompt`）。`workspace` 不存在时回退用户主目录。认领后 60 秒内没有真实活动即视为建会话失败，允许重试。
 
-要点：
+**要点**：会话控制器缺失（headless/ACP）时插件永久关闭自动接管；Mod 从不启动 dsh——没有开着的 dsh 就没人认领。
 
-- 认领过期（60s 内没有任何 dsh 活动）视为建会话失败，允许插件再试，因此坏掉的会话不会把整局卡死。
-- `sts2_takeover` 被排除在“dsh 活动”打点之外，否则轮询会让「dsh 静默回退」永不生效。
-- 没有会话控制器的 profile（headless / ACP）里，插件检测到该服务缺失就永久关闭自动接管，不反复重试。
-- mod **不启动 dsh**：没有开着的 dsh，就没有人轮询、也没有人认领。
+## 10. 设置项（设置 → 模组设置 → AI 队友 → 外部 Agent（dsh））
 
-## 7. 动作执行与并发
-
-- 所有动作在主线程**同步校验 + 发起**，然后桥接线程 `await Task.Delay(~900ms)` 并抓取新快照返回。
-- 游戏侧动作串行（`SemaphoreSlim`）；只读工具与 `wait` 可并发。
-- 出牌/用药水的异步完成复用现有 executor 路径（异常写入 `AiLog` 和 `last_action.detail`）。
-- 单人、多人皆可动作：`controlled.kind=local` 时 dsh 驱动本地真人玩家（多人局只动自己那份，别人的回合与投票不受影响）。
-- AI 玩家（单人爬塔 / 多人 AI 队友）由 dsh 当大脑：决策走 `sts2_decide`，此时 UI 动作工具被拒绝，避免和内置执行器抢同一个玩家。
-- 外部 Agent 自己出牌时不经过 `ProcessCombatTurnAsync`，45 秒回安全网保持原样；当 dsh 当大脑时网络放宽到 330 秒。
-
-## 8. 安全
-
-- 默认**关闭**；开启后仅监听 `127.0.0.1`。
-- 可选 Bearer-style token（请求字段 `token`）。
-- 只暴露游戏动作，不提供文件/进程/网络代理能力。
-- 不读取/回传 API Key、Cookie 等设置。
-- 所有动作通过游戏自身 API/UI 节点执行，不修改存档文件。
-- dsh 插件以源码/本地 bundle 形式交付，安装时不会执行构建脚本。
-
-## 9. 设置项（RitsuLib）
-
-新增分区「外部 Agent（dsh）」：
-
-| 键 | 默认 | 说明 |
+| 字段 | 默认 | 说明 |
 |---|---|---|
-| `EnableAgentBridge` | `false` | 启动 TCP 桥接 |
-| `AgentBridgePort` | `26333` | 监听端口 |
-| `AgentBridgeToken` | `""` | 可选请求 token |
-| `AgentBridgeAllowActions` | `true` | 允许动作工具；关闭后只能读 |
-| `AgentChatToDsh` | `true` | 由 dsh 回复游戏聊天（仅在插件轮询 `sts2_chat_poll` 时生效） |
+| `EnableAgentBridge` | `false` | 启动 127.0.0.1 TCP 桥接 |
+| `AgentBridgePort` | `26333` | 监听端口（clamp 1024..65535） |
+| `AgentBridgeToken` | `""` | 可选 token，非空时每个请求都要带 |
+| `AgentBridgeAllowActions` | `true` | 关掉即只读 |
+| `AgentFallbackSeconds` | `30` | dsh 静默多久后回退自带后端；0 = 永不回退（滑杆 0..300） |
+| `AgentChatToDsh` | `true` | 由 dsh 回复游戏聊天 |
 | `AgentChatReplyTimeoutSeconds` | `120` | 一条聊天等 dsh 的秒数 |
-| `AgentChatFallbackToBackend` | `true` | 超时/断开时由内置后端补答 |
+| `AgentChatFallbackToBackend` | `true` | 超时/断开时内置后端补答 |
+| `AutoLaunchAgentSession` | `true` | AI 队友入局时邀请 dsh 认领 |
+| `AgentLaunchWorkspace` | `F:\sts2-mod\MiniMods` | 新会话归属目录（dsh 按它分组） |
+| `AgentLaunchPrompt` | `AgentTakeoverInvite.DefaultPrompt` | 新会话首条消息模板 |
 
-设置页显示运行状态（运行中 / 端口占用 / 错误）和**已连接的 dsh 客户端数**。连接/断开时 `AiLogger` 记录 `[Agent] client connected/disconnected`。由于插件是懒连接，只有 dsh 第一次调用 `sts2_*` 工具后才会看到客户端。
+> 修正：旧文档只列了 7 项，缺 `AgentFallbackSeconds`、`AutoLaunchAgentSession`、`AgentLaunchWorkspace`、`AgentLaunchPrompt`（`AiSettings.cs:277,304,307,310`）。
 
-### 9.1 dsh 侧为什么默认“没有端口设置、看不到连接状态”
+设置页状态行显示运行中/端口占用/错误、已连接客户端数、聊天中继是否就绪，以及接管窗口状态；「重启」按钮走 `AgentBridgeService.Restart()`，端口或 token 改完立即生效。
 
-dsh 应用设置页（**设置 → 插件 → 可配置**）不会自动为任何命名空间生成表单：该页按「Host 注册的设置命名空间」∩「浏览器端注册的卡片」取交集渲染，**一个被服务但没有卡片认领的命名空间什么都不显示**（见 `@deepseek-ai/dsh-client-ui-settings-plugins` 的 `tab-store` 注释）。所以端口与状态要在 dsh 里可见，插件必须自己补齐宿主与浏览器两半：
+游戏内可见性：聊天面板标题栏在有客户端时显示 `dsh` 徽标（可动作=亮蓝、只读=灰），tooltip 带客户端数，最小化按钮文案变为 `AI 队友 · dsh`；由 `ClientCountChanged` 驱动，普通单人局也会因此显示面板（`NGamePatch.cs:591`）。
 
-- 宿主半区 `ctx.settings.register('sts2', Schema.object({host, port, token, ...}), { applies: 'live' })` 声明配置命名空间；`cordis.patch.yml` 的 `config` 作为 `base` 层，设置文档里的用户层覆盖它，所以改设置不动 profile 文件。
-- 另注册一个只显示的 `sts2-status` 命名空间（`state` / `endpoint` / `detail` / `updatedAt`），桥接线程在连接、断开、出错时镜像一次状态；设置文档变更本来就推送到浏览器，卡片因此不需要额外 RPC。
-- 浏览器半区 `lib/client.js`（手写 ESM bundle；元数据 `dsh.client.platform = 'web'` + `exports['./client']`）把卡片注册进 `settings.plugin.item` 槽，key 为 `sts2`。浏览器启动只预置 `react` / `react/jsx-runtime` / `@deepseek-ai/cordis` / `dsh-client-store` / `dsh-client-ui-slots` / `dsh-client-ui-primitives` / `dsh-client-ui-dockkit` 这些静态模块，所以卡片只用 `require('react')`，其余能力走 cordis 服务（`settingsScope`、`slots`）。
-- 客户端 bundle 只在 dsh 启动时扫描并组合进 `window.__DSH_BOOT__`，**改完必须重启 dsh** 才看得到卡片。
+> 注：设置页 `agent_actions` 的说明文字仍写着"Actions are singleplayer-only"，与实现不符——多人局允许驱动本地玩家自己那份（`AgentSnapshot.cs:277` 的提示语）；只有"当局的 AI 玩家由 dsh 当大脑"时才拒绝 UI 动作。
 
-### 9.2 游戏内接管标识（聊天面板标题栏）
+## 11. 安全与限制
 
-为了能一眼看出这局是不是 dsh 在开，聊天面板标题栏会在有 dsh 客户端连上时显示一个 **`dsh` 徽标**：
+- 默认关闭；开启后仅监听回环地址，不对外网开放。
+- 可选 token（请求字段 `token`，等值比较）。
+- 只暴露游戏动作与只读查询，不提供文件/进程/网络代理；不读取/回传 API Key、Cookie。
+- 所有动作都走游戏自身 API/UI 节点（`TryManualPlay`、`ForceClick`、`ActionQueueSynchronizer.RequestEnqueue`），不直接改存档文件。
+- 已知边界：`rune_select` 里"只调敌方海克斯"的界面不驱动；`unsupported` overlay 需要人工处理；`sts2_start_run` 不能开 Dread/Blitz 单人局；Dread/Blitz 仅 0.113.1+ 存在。
 
-- 徽标在 `AgentBridgeService.ConnectedClients > 0` 时出现；`AgentBridgeAllowActions` 打开时是亮蓝色（接管），关闭时是灰色（只读），tooltip 带客户端数量。
-- 面板最小化后的按钮文字同步变成 `AI 队友 · dsh`，收起状态下也能辨认。
-- 变化由 `AgentBridgeService.ClientCountChanged` 驱动：它在 `SuperviseTick` 的最前面比对客户端数量（早于设置指纹短路，因此 dsh 连上/断开与设置变更无关），事件在主线程触发，`NGamePatch.OnAgentClientCountChanged` 只在数量真正变化时重算面板可见性。
-- `ShouldShowChatPanel` 额外接受「有外部 Agent 连接」，否则普通单人局根本不会创建面板，徽标无处可显示。断开后若既不是单人爬塔也没有 AI 队友，面板会重新隐藏。
-- 没有 `AiPlayer` 时面板依然安全：`ChatManager.HandlePlayerMessage` 对 `AiPlayer == null` 做了空值处理（run prelude / 战斗上下文都退化为空串）。
+## 12. 行为要点（易踩的坑）
 
+- 出牌必须 `TryManualPlay`，`AutoPlay` 免费且不扣费。
+- 结束回合必须走同步 `EndPlayerTurnAction`；直接改 ready 标记会让客户端独自进入回合结束阶段一并掉线。
+- 弃药水同理走 `DiscardPotionGameAction`。
+- 目标寻址是 `Decision/CombatTargetResolver.cs` 单一入口：`#[n]`/`n`/`名字#n`/`名字(12/50)`/敌人名/怪物 id/自身别名；同名多只不带索引会**报歧义**而不是取第一个，解析结果在执行前锁成具体 `Creature`。
+- token 剔除 `age_seconds`，否则 `sts2_wait` 立即返回、autoplay 反复空转。
+- 打牌/选目标/选牌都靠当前 UI 或决策，任何"猜一个"的兜底都可能把状态带歪。
+- 只读模式不含动作；`sts2_takeover`、`sts2_chat_*` 不算活动打点。
+- 桥接在 `NGame` 就绪前不启动，端口冲突会记 `LastError` 并在设置页显示。
 
-## 10. 安装与使用
+## 13. 故障排查
 
-### 10.1 安装插件
+1. `sts2_status` 报 NOT CONNECTED：先看设置页状态行（未启用 / 端口占用 / `The game is not ready yet.`），再核对插件 `port` 与 token 是否一致。
+2. 连上了但 AI 一直用自带后端：`ClientIdleSeconds` 超过 `AgentFallbackSeconds`；让 dsh 调一次 `sts2_state` 即可恢复，也检查 dsh 那边是否真的在跑 agent 轮次。
+3. `sts2_play_card` 一直被拒：确认 `phase=combat`、`controlled.kind=local`、不在 `NPlayerHand.IsInCardSelection`；AI 模式下这个工具本就不该用。
+4. AI 卡在 `ai_busy`：看 `last_decision` 是否把动作全丢了（卡名/费用/目标不对），或 `Phase 3` 是否被误开（`ExternalBrainActive`）。
+5. 玩家聊天没被回复：确认插件在轮询（`chat.capable` 为 true）、`reply_to` 是否是 `chat.pending` 里的 seq；被内置后端补答的 seq 仍接受为迟到回复。
+6. 玩家自己打牌却被吞了选牌界面：检查 `AgentWatching`（10 秒窗口）——只有 dsh 仍在持续调用才会接管手牌选择。
+7. 多人局掉 `StateDivergence`：查两端 `externalBrain` 是否一致、是否有人在多人局里让 dsh 决定 AI 选牌。
+8. 自动接管没反应：`AutoLaunchAgentSession` 是否开着、AI 是否入局满 30 秒、最近 15 秒是否已有 dsh 请求、本局认领次数是否用完；headless/ACP profile 没有会话控制器，插件会永久关闭该功能。
+9. 改动后要在干净主菜单根上开局/建房；在任何大厅里调用会被拒绝并提示先 `sts2_proceed`。
 
-插件已发布到 npm（包名 `dsh-sts2`），**不需要**随 Mod 分发：
-
-**桌面端（dsh desktop）**：`desktop` profile 由 Electron 应用独占，命令行改不了。在应用内 设置 → 插件 里安装 `dsh-sts2`（npm 包名或本地仓库目录），然后重启应用。
-
-**命令行（web / headless）**：
-
-```sh
-# 安装到 web profile
-# dsh profile 的 pnpm-workspace 把 profile 自己当作 workspace 根，需要 -w
-dsh plugin --profile web add -w dsh-sts2
-
-# 其他 profile 替换 web
-dsh plugin --profile <name> add -w dsh-sts2
-
-# 只验证配置层，不启动
-dsh --profile web --dump-config
-```
-
-安装后 `package.json` 的 `dsh.profile.bundles` 会多出 `dsh-sts2`，其 `cordis.patch.yml` 默认插入：
-
-```yaml
-- insert:
-    - id: sts2
-      name: 'dsh-sts2'
-      config:
-        host: '127.0.0.1'
-        port: 26333
-```
-
-本地开发时先给 checkout 安装依赖，再把 checkout 链进 profile：
-
-```sh
-cd dsh-sts2 && npm install --registry https://registry.npmjs.org
-dsh plugin --profile web add -w /absolute/path/to/dsh-sts2
-dsh --profile web --dump-config
-```
-
-> 发布后的 npm 安装由 pnpm 正常安装 `dependencies`；`--patch` overlay 要求模块解析能找到 `@deepseek-ai/dsh-*`，优先用 link 方式。
-
-### 10.2 开始接管
-
-1. 游戏内：设置 → 模组设置 → AI 队友 → 外部 Agent，打开开关（端口与插件一致）。
-2. 选一种玩法：
-   - **自己玩**：开一局普通单人游戏（或让 dsh 用 `sts2_start_run` / `sts2_continue_run` 开局、续档），dsh 用 UI 动作出牌。
-   - **给 AI 当大脑**：开「AI 独自爬塔」，或开一局带 AI 队友的多人局。连接后快照进入 `ai_decision`，dsh 用 `sts2_decide` 回答。
-3. 在 dsh 里先确认连接：说“sts2 连上了吗？”，dsh 调用 `sts2_status`；返回 CONNECTED 后，游戏设置页的状态行也会显示“已连接 1 个 dsh 客户端”。
-4. 在 dsh 里说：
-   > 你来玩这局《杀戮尖塔 2》。先调用 `sts2_autoplay` 打开自动接管，然后一直玩到本局结束。
-5. dsh 会自己循环：`sts2_wait` → 读状态 → 出牌/选择/回答决策 → 再等待；战斗、地图、奖励、商店、篝火、事件、宝箱、选包、水晶球全部由它处理。
-6. 想收回控制权：`sts2_autoplay {enabled:false}`，或直接关闭游戏内开关（AI 会立刻退回内置后端）。
-
-## 11. 验证计划
-
-1. `dotnet build`（0.107.1）与 `dotnet build -p:VariantTarget=0.111.0`（beta）均通过。
-2. 插件侧：`npm test`（TCP 协议 7 个用例）、`npm pack --dry-run`、`dsh plugin --profile <tmp> add -w <checkout>` 后用 `--dump-config` 确认 `# == dsh-sts2` 层。
-3. 用 `@deepseek-ai/dsh-tools` 的 `defineTool` 实机注册一次工具（fake ctx），确认全部工具与 JSON Schema 都能通过校验。
-4. 用 `node -e` 起一个 TCP 客户端，验证 `sts2_hello` / `sts2_state` / `sts2_wait` 的帧格式。
-5. 进游戏：开启开关 → dsh 列出工具 → 打一场战斗 → 奖励/地图/商店/篝火/事件/宝箱各走一遍 → autoplay 连续跑 3 个房间。
-6. 关闭开关：端口释放，插件工具返回连接错误，游戏不受影响。
-
-## 12. 文件清单
+## 14. 文件清单
 
 | 文件 | 内容 |
 |---|---|
-| `AiTeammateCode/Agent/AgentBridgeService.cs` | 生命周期、设置指纹、启动/停止、状态文案 |
-| `AiTeammateCode/Agent/AgentBridgeSupervisor.cs` | Godot `Node`，每秒轮询设置 |
-| `AiTeammateCode/Agent/AgentBridgeServer.cs` | TcpListener + 行 JSON 协议 |
-| `AiTeammateCode/Agent/AgentToolExecutor.cs` | 工具分发、`wait` 循环、结果封装、动作串行 |
-| `AiTeammateCode/Agent/AgentSnapshot.cs` | 阶段判定、快照 JSON、token、options |
-| `AiTeammateCode/Agent/AgentMenuSupport.cs` | **v2.4**：主菜单/子菜单/大厅的枚举与按下（`menu` 对象、`options`、`TryPress` / `TryGoBack`） |
-| `AiTeammateCode/Agent/AgentActions.cs` | 各动作的游戏 API/UI 实现 |
-| `AiTeammateCode/Solo/AgentRunLauncher.cs` | **v2.4**：标准/每日/自定单人开局（词条解析、主菜单根守卫） |
-| `AiTeammateCode/Compat/DailyRunCompat.cs` | **v2.4**：每日种子/角色/进阶/2 好 1 坏词条复算（0.107/0.111 RNG 差异） |
-| `AiTeammateCode/Patches/DailyCustomLobbyAiPatch.cs` | **v2.4**：每日/自定多人房创建时自动加入并准备 AI 队友 |
-| `AiTeammateCode/Agent/AgentDecisionBroker.cs` | v2：把 AI 的决策调用挂起，等 dsh 用 `sts2_decide` 回答 |
-| `AiTeammateCode/Decision/CombatTargetResolver.cs` | **v2.4.4**：敌人/队友目标的唯一解析入口（索引 / #索引 / 同名歧义 / 血量消歧 / 存活过滤） |
-| `AiTeammateCode/Agent/AgentChatRelay.cs` | v2.3：聊天中继（玩家发言队列、`sts2_chat_poll` / `sts2_chat_send`、能力探测、超时回退） |
-| `AiTeammateCode/Settings/AiSettings.cs` | 4 个新设置字段 |
-| `AiTeammateCode/Settings/AiSettingsPage.cs` | 新分区、状态段落、重启按钮 |
-| `AiTeammateCode/Patches/NGamePatch.cs` | 挂载 supervisor |
-| `AiTeammate/localization/{eng,zhs}.json` | 设置/提示文案 |
-| `docs/dsh-agent-bridge.md` | 本文档 |
-
-独立仓库 `dsh-sts2`（不在本仓库内）：
-
-| 文件 | 内容 |
-|---|---|
-| `package.json` | npm 包 / dsh bundle manifest |
-| `cordis.patch.yml` | 插件行 |
-| `index.js` | 工具注册 + autoplay |
-| `lib/bridge.js` | TCP 行 JSON 客户端 |
-| `test/protocol.test.mjs` | 协议测试 |
-| `.github/workflows/publish.yml` | tag 触发 npm publish |
-
-## 13. 后续可扩展
-
-- 多人模式动作（本地玩家投票/出牌）与观战模式。
-- 把动作工具拆成更细的 UI 呈现（dsh 卡片式工具结果）。
-- `sts2_say`：把 dsh 的发言显示在游戏聊天面板/气泡里。
-- 让插件用 `ctx.goals` 持久化“本局目标”，跨进程恢复接管。
-
-## 14. 开发自检工具
-
-- **`sts2_quit_app`**（控制动作）：等价主菜单的「退出」，让游戏自己结束进程。自动化测试用它收尾——Steam 以管理员启动时外部进程 `Stop-Process` 会被拒绝，游戏自己退则没有这个限制。
-- 一次性回归脚手架（商店删牌 `sts2_test_shop_removal` + `tools/test-shop-removal.ps1`、同名敌人寻址 `sts2_test_targeting` + `tools/test-targeting.ps1`）在验证通过后已按用户要求删除，需要回归时按 git 历史恢复即可；`--headless` 下主菜单会带 `NGenericPopup` 模态挡住桥接动作，自动化脚本需用窗口模式启动。
-
+| `Agent/AgentBridgeServer.cs` | TcpListener + 行 JSON 协议、token、被动调用判定、客户端计数 |
+| `Agent/AgentBridgeService.cs` | 生命周期、设置指纹、客户端活动打点、`ClientCountChanged` |
+| `Agent/AgentBridgeSupervisor.cs` | Godot `Node`，每秒 `SuperviseTick` |
+| `Agent/AgentToolExecutor.cs` | 工具分发、`wait` 循环、delta、动作串行、`play_cards`/`claim_rewards` |
+| `Agent/AgentSnapshot.cs` | 阶段判定、快照 JSON、token、options |
+| `Agent/AgentMenuSupport.cs` | 主菜单/子菜单/大厅枚举与按下（含 Dread/Blitz 反射识别） |
+| `Agent/AgentActions.cs` | 各动作的游戏 API/UI 实现、运行控制 |
+| `Agent/AgentDecisionBroker.cs` | 决策挂起/应答/超时/静默回退 |
+| `Agent/AgentDecisionFeedback.cs` | `last_decision`（dropped/resolved/valid） |
+| `Agent/AgentChatRelay.cs` | 聊天中继、poll/send、超时回退 |
+| `Agent/AgentTakeoverInvite.cs` | 自动接管邀请窗口与首条提示词 |
+| `Agent/AgentNotes.cs` | `sts2_note` 笔记持久化（按种子） |
+| `Agent/HextechRuneSelectSupport.cs` | Hextech 符文选择界面的反射桥 |
+| `Solo/AgentRunLauncher.cs` | 标准/每日/自定单人开局（Dread/Blitz 拒绝并转 `sts2_host`） |
+| `Compat/DailyRunCompat.cs`、`Compat/GameCompat.cs` | 每日种子/角色/进阶/词条复算；`IsAutoAiLobby`、`FastHost`、模式按名解析 |
+| `Patches/RoomPatches.cs` | `DshHandSelect`：手牌/牌堆/选牌屏 parking 与启发式兜底 |
+| `Patches/NGamePatch.cs` | 挂载 supervisor、dsh 徽标、面板可见性 |
+| `Settings/AiSettings.cs`、`AiSettingsPage.cs` | 11 个字段与「外部 Agent（dsh）」页 |
+| `docs/dsh-agent-bridge.md` | 本文 |

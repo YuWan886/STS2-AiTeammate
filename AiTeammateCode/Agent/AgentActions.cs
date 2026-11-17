@@ -208,8 +208,9 @@ internal static class AgentActions
     }
 
     /// <summary>
-    /// Hosts a multiplayer lobby for one of the three game modes from the clean main menu.
-    /// 程序化建主：标准 / 每日 / 自定。
+    /// Hosts a multiplayer lobby for any game mode from the clean main menu: standard, daily, custom
+    /// and (0.113.1+) Dread / Blitz.
+    /// 程序化建主：标准 / 每日 / 自定 / Dread / Blitz。
     /// </summary>
     private static AgentActionResult HostRun(JsonObject args)
     {
@@ -226,12 +227,27 @@ internal static class AgentActions
 
         var mode = AgentRunLauncher.ParseMode(StringArg(args, "mode"));
         var isCustom = mode == AgentRunMode.Custom;
-        var gameMode = mode switch
+        GameMode gameMode;
+        switch (mode)
         {
-            AgentRunMode.Daily => GameMode.Daily,
-            AgentRunMode.Custom => GameCompat.CustomRunGameMode,
-            _ => GameMode.Standard
-        };
+            case AgentRunMode.Daily:
+                gameMode = GameMode.Daily;
+                break;
+            case AgentRunMode.Custom:
+                gameMode = GameCompat.CustomRunGameMode;
+                break;
+            case AgentRunMode.Dread:
+            case AgentRunMode.Blitz:
+                // Dread/Blitz only exist from 0.113.1 on, so the enum value is resolved at runtime.
+                var name = mode == AgentRunMode.Dread ? "Dread" : "Blitz";
+                if (GameCompat.GameModeByName(name) is not { } newMode)
+                    return Fail($"{name} does not exist in this game version.");
+                gameMode = newMode;
+                break;
+            default:
+                gameMode = GameMode.Standard;
+                break;
+        }
 
         try
         {
@@ -246,8 +262,8 @@ internal static class AgentActions
             MainFile.Logger.Info($"[Agent] hosting a {gameMode} multiplayer lobby");
             return new AgentActionResult(true,
                 $"Hosting a {modeName} multiplayer lobby. Call sts2_wait until the lobby screen is ready "
-                + "(phase=char_select / daily_lobby / custom_lobby); the AI teammate is added automatically "
-                + "in daily and custom lobbies.", 3500);
+                + "(phase=char_select / daily_lobby / custom_lobby / dread_lobby / blitz_lobby); the AI "
+                + "teammate is added automatically in every non-standard lobby.", 3500);
         }
         catch (Exception ex)
         {
@@ -736,7 +752,8 @@ internal static class AgentActions
         var skip = BoolArg(args, "skip");
 
         // Main menu / lobby screens: press the option the same capture enumerated.
-        if (snap.Phase is "menu" or "char_select" or "daily_lobby" or "custom_lobby")
+        if (snap.Phase is "menu" or "char_select" or "daily_lobby" or "custom_lobby"
+            or "dread_lobby" or "blitz_lobby")
         {
             if (index is not { } menuIndex)
                 return Fail("Missing 'index' for this menu screen.");
@@ -1238,7 +1255,8 @@ internal static class AgentActions
             "treasure" => ProceedTreasure(),
             "game_over" => ProceedGameOver(),
             "room_proceed" => ProceedRoom(),
-            "menu" or "char_select" or "daily_lobby" or "custom_lobby" => ProceedMenu(),
+            "menu" or "char_select" or "daily_lobby" or "custom_lobby"
+                or "dread_lobby" or "blitz_lobby" => ProceedMenu(),
             _ => ProceedRoom()
         };
     }

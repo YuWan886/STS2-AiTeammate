@@ -13,16 +13,19 @@ using AiTeammate.AiTeammateCode.Localization;
 namespace AiTeammate.AiTeammateCode.Ui;
 
 /// <summary>
-/// Compact "AI teammate" card for the daily / custom multiplayer lobby screens.
+/// Compact "AI teammate" card for the lobby screens that have no character picker for the AI:
+/// daily, custom, and (beta 0.113.1+) Dread and Blitz.
 ///
-/// Those two screens have no character picker at all (the daily character is rolled by the seed and
-/// the custom screen's buttons belong to the human), so the AI teammate was auto-added
-/// (<see cref="Patches.DailyCustomLobbyAiPatch"/>) with whatever character
-/// <see cref="AiTeammateManager.AddAiToLobby"/> picked and could never be changed. The standard
-/// character-select screen keeps its full AI panel (<see cref="Patches.CharacterSelectScreenPatch"/>);
-/// this card is the same idea in a smaller form: show who the AI is, and open a character grid.
+/// Those screens either roll the human's character from the seed or expose only the human's own
+/// buttons, so the AI teammate was auto-added (<see cref="Patches.AutoLobbyAiPatch"/>) with whatever
+/// character <see cref="AiTeammateManager.AddAiToLobby"/> picked and could never be changed. The
+/// standard character-select screen keeps its full AI panel
+/// (<see cref="Patches.CharacterSelectScreenPatch"/>); this card is the same idea in a smaller form:
+/// show who the AI is, and open a character grid.
 ///
-/// 每日挑战 / 自定义模式下 AI 队友是自动加入的，那两个界面没有自己的角色选择器，
+/// The card starts in the free top-left corner; <see cref="EnsureParked"/> moves it out of the way
+/// once, for the new lobby screens whose remote-player list occupies that corner.
+/// 每日/自定/Dread/Blitz 下 AI 队友是自动加入的，那些界面没有自己的角色选择器，
 /// 所以 AI 的角色没法调整；这里补一个可展开的 AI 卡片。
 /// </summary>
 public partial class LobbyAiCharacterPanel : PanelContainer
@@ -46,6 +49,7 @@ public partial class LobbyAiCharacterPanel : PanelContainer
     private Label _statusLabel = null!;
     private double _refreshTimer;
     private bool _warned;
+    private bool _parked;
 
     public LobbyAiCharacterPanel()
     {
@@ -203,6 +207,7 @@ public partial class LobbyAiCharacterPanel : PanelContainer
 
             _warned = false;
             Visible = true;
+            EnsureParked();
 
             var character = ai.Value.character;
             _icon.Texture = character?.IconTexture;
@@ -225,6 +230,82 @@ public partial class LobbyAiCharacterPanel : PanelContainer
             _warned = true;
             MainFile.Logger.Warn($"[Lobby] AI character card refresh failed: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Daily/custom leave the top-left corner free, but the Dread/Blitz lobbies put their
+    /// remote-player list exactly there (Dread: 48,36 → 566,435), and the card would sit on top of
+    /// it. Once per screen, move the card to the right of that list when it still fits on screen,
+    /// otherwise just below it. 每日/自定左上角是空的；Dread/Blitz 的玩家列表就在左上角，这里把卡片挪开一次。
+    /// </summary>
+    private void EnsureParked()
+    {
+        if (_parked)
+            return;
+        if (GetParent() is not NSubmenu screen)
+            return;
+
+        try
+        {
+            var remote = screen.GetNodeOrNull<Control>("RemotePlayerContainer")
+                         ?? screen.FindChild("RemotePlayerContainer", recursive: true, owned: false) as Control;
+            if (remote == null || remote.Size.X <= 0f || remote.Size.Y <= 0f)
+                return;
+
+            var list = new Rect2(remote.GlobalPosition - screen.GlobalPosition, remote.Size);
+            var card = new Rect2(Position, new Vector2(CustomMinimumSize.X, 150f));
+            if (!list.Intersects(card))
+            {
+                _parked = true;
+                return;
+            }
+
+            // Both new lobbies pin an info button (DreadInfoButton / BlitzInfoButton, 64x64 at a 24px
+            // margin) to the top-right corner, so the card sits to the LEFT of it instead of covering
+            // it. The bare top-right edge is used only when the button cannot be found; either way the
+            // card drops below the player list on a screen too narrow to hold it.
+            var viewport = GetViewportRect().Size;
+            var info = FindInfoButton(screen);
+            var rightEdge = info != null
+                ? info.GlobalPosition.X - screen.GlobalPosition.X - 12f
+                : viewport.X - PanelPosition.X;
+            var cardX = Mathf.Max(PanelPosition.X, rightEdge - card.Size.X);
+            Position = cardX > list.End.X + 12f
+                ? new Vector2(cardX, PanelPosition.Y)
+                : new Vector2(PanelPosition.X, list.End.Y + 12f);
+            _parked = true;
+            MainFile.Logger.Info(
+                $"[Lobby] AI character card moved to {Position} to clear the player list of {screen.GetType().Name}");
+        }
+        catch (Exception ex)
+        {
+            _parked = true;
+            MainFile.Logger.Warn($"[Lobby] could not park the AI character card: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// The "?" button both new lobbies pin to their top-right corner (DreadInfoButton /
+    /// BlitzInfoButton, both instances of dread_info_button.tscn anchored to the right edge).
+    /// 恐惧/极速大厅右上角的问号按钮，卡片要避开它。
+    /// </summary>
+    private static Control? FindInfoButton(NSubmenu screen)
+    {
+        foreach (var name in new[] { "%DreadInfoButton", "%BlitzInfoButton", "DreadInfoButton", "BlitzInfoButton" })
+        {
+            try
+            {
+                var node = screen.GetNodeOrNull<Control>(name);
+                if (node != null && GodotObject.IsInstanceValid(node))
+                    return node;
+            }
+            catch
+            {
+                // A missing node is the normal case for the other lobby screen.
+            }
+        }
+
+        return null;
     }
 
     private void OnChangePressed()
@@ -284,7 +365,7 @@ public partial class LobbyAiCharacterPanel : PanelContainer
     }
 
     /// <summary>
-    /// Both screens build their remote-player rows once at lobby init, so the AI's row and (on the
+    /// Lobby screens build their remote-player rows once at lobby init, so the AI's row and (on the
     /// custom screen) its "picked by a remote player" marker keep the old character after a change.
     /// Re-deliver the changed lobby player so the vanilla UI matches the card.
     /// </summary>
@@ -303,6 +384,12 @@ public partial class LobbyAiCharacterPanel : PanelContainer
                     break;
                 case MegaCrit.Sts2.Core.Nodes.Screens.CustomRun.NCustomRunScreen custom:
                     GameCompat.NotifyPlayerChanged(custom, ai.Value);
+                    break;
+                default:
+                    // Dread / Blitz (0.113.1+) implement the same PlayerChanged(LobbyPlayer) hook, but
+                    // their types are not compiled into the older variants: the shim reflects on it.
+                    if (GetParent() is NSubmenu other)
+                        GameCompat.NotifyPlayerChanged(other, ai.Value);
                     break;
             }
         }

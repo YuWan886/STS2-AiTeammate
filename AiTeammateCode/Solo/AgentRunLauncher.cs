@@ -18,15 +18,23 @@ using AiTeammate.AiTeammateCode.Settings;
 namespace AiTeammate.AiTeammateCode.Solo;
 
 /// <summary>
-/// The run kinds the external agent can start: a normal run, today's daily (server time + the
-/// daily seed/modifiers) or a custom run with explicit modifiers.
-/// 外部 Agent 可开的三种单人局。
+/// The run kinds the external agent can name: a normal run, today's daily (server time + the daily
+/// seed/modifiers) or a custom run with explicit modifiers. Dread / Blitz (0.113.1+) are parsed so
+/// the agent gets a precise answer instead of silently starting a standard run; they are hosted
+/// through <c>sts2_host</c> and have no singleplayer fast path here yet.
+/// 外部 Agent 可命名的局：标准 / 每日 / 自定（Dread/Blitz 只用于转交建主）。
 /// </summary>
 internal enum AgentRunMode
 {
     Standard,
     Daily,
-    Custom
+    Custom,
+
+    /// <summary>Beta 0.113.1 "Dread" mode; multiplayer hosting only for now.</summary>
+    Dread,
+
+    /// <summary>Beta 0.113.1 "Blitz" mode; multiplayer hosting only for now.</summary>
+    Blitz
 }
 
 /// <summary>
@@ -42,6 +50,8 @@ internal static class AgentRunLauncher
         {
             "daily" => AgentRunMode.Daily,
             "custom" => AgentRunMode.Custom,
+            "dread" => AgentRunMode.Dread,
+            "blitz" => AgentRunMode.Blitz,
             _ => AgentRunMode.Standard
         };
     }
@@ -53,6 +63,19 @@ internal static class AgentRunLauncher
         var mode = ParseMode(modeText);
         if (mode == AgentRunMode.Daily)
             return StartDaily();
+
+        // Dread/Blitz runs are set up by their own lobby screens (Dread forces ascension 10 and the
+        // rotation bookkeeping, Blitz owns the timer and its merchant pool), so a singleplayer start
+        // is not just StartNewSingleplayerRun with another enum value. Refuse instead of starting a
+        // standard run under a Dread-sounding name.
+        if (mode is AgentRunMode.Dread or AgentRunMode.Blitz)
+        {
+            var name = mode == AgentRunMode.Dread ? "dread" : "blitz";
+            return (false,
+                $"sts2_start_run cannot start a {name} run. Host its multiplayer lobby with "
+                + $"sts2_host {{mode: \"{name}\"}} (the AI teammate is added automatically) or start it "
+                + "from the main menu; a standard/daily/custom singleplayer run still works.");
+        }
 
         return StartLocal(mode, characterId, ascensionLevel, seed, modifierIds);
     }

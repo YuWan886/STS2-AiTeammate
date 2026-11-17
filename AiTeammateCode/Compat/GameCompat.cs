@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Threading.Tasks;
 using HarmonyLib;
@@ -292,14 +293,67 @@ internal static class GameCompat
         };
     }
 
-    /// <summary>0.113 dropped <c>GameMode.Custom</c>: a custom lobby is daily mode or the <c>IsCustom</c> flag.</summary>
-    public static bool IsDailyOrCustomLobby(StartRunLobby lobby)
+    /// <summary>
+    /// True for every lobby kind without a vanilla "add AI teammate" control: daily, custom and
+    /// (0.113.1+) Dread and Blitz. A standard lobby keeps the character-select screen's own AI panel.
+    ///
+    /// Deliberately written as "anything but Standard": <c>GameMode.Dread</c>/<c>Blitz</c> were
+    /// appended to the enum in 0.113.1, so naming them here would not compile against the older
+    /// snapshots this bundle still ships (0.107.1 / 0.111.x / 0.113.0), while <c>GameMode.Standard</c>
+    /// exists in every version. 0.113 also turned a custom run into "Standard + the IsCustom flag",
+    /// which the flag check below picks up.
+    /// 非标准局（每日 / 自定 / Dread / Blitz）的大厅都没有原生「添加 AI」入口。
+    /// </summary>
+    public static bool IsAutoAiLobby(StartRunLobby lobby)
     {
 #if STS2_API_0_113_OR_LATER
-        return lobby.GameMode == GameMode.Daily || lobby.IsCustom;
+        return lobby.GameMode != GameMode.Standard || lobby.IsCustom;
 #else
-        return lobby.GameMode is GameMode.Daily or GameMode.Custom;
+        return lobby.GameMode != GameMode.Standard;
 #endif
+    }
+
+    /// <summary>
+    /// Resolves a game-mode name at runtime. The value is parsed from the *host* game's enum, so
+    /// "Dread"/"Blitz" resolve on 0.113.1+ even though the content assembly was compiled against
+    /// 0.113.0 (which has neither member); on an older host the parse simply fails and returns null.
+    /// 按名字取游戏模式；老版本上没有 Dread/Blitz 时返回 null。
+    /// </summary>
+    public static GameMode? GameModeByName(string name)
+    {
+        try
+        {
+            if (Enum.TryParse<GameMode>(name, ignoreCase: true, out var mode)
+                && Enum.IsDefined(typeof(GameMode), mode))
+            {
+                return mode;
+            }
+        }
+        catch
+        {
+            // A name the host enum does not have is the expected miss, not an error.
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Re-delivers a lobby player change to a screen whose concrete type only exists on 0.113.1+
+    /// (Dread / Blitz). Those lobby screens implement <c>IStartRunLobbyListener.PlayerChanged(LobbyPlayer)</c>
+    /// exactly like the daily/custom screens, but naming them would break the older variants, so the
+    /// call goes through reflection.
+    /// </summary>
+    public static void NotifyPlayerChanged(NSubmenu screen, LobbyPlayer player)
+    {
+        try
+        {
+            var method = screen.GetType().GetMethod("PlayerChanged", new[] { typeof(LobbyPlayer) });
+            method?.Invoke(screen, new object[] { player });
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Lobby] could not refresh the player list of {screen.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>0.113 added the <c>isCustom</c> flag to <c>NMultiplayerSubmenu.FastHost</c>.</summary>

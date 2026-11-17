@@ -392,6 +392,8 @@ public class AiTeammateManager
         {
             if (character != null)
                 SetAiCharacter(lobby, character);
+            // Re-assert the MLB capability: it may have loaded (or been reloaded) after the AI joined.
+            MlbPeerCompat.RegisterAiPeer(lobby, existing.Value.id);
             MainFile.Logger.Info("AI already in lobby, reusing the existing entry");
             return GetAiLobbyPlayer(lobby);
         }
@@ -426,6 +428,9 @@ public class AiTeammateManager
         var aiLobbyPlayer = GameCompat.CreateLobbyPlayer(aiNetId, slot, character, hostPlayer, isReady: false);
 
         lobby.Players.Add(aiLobbyPlayer);
+        // The AI is a roster entry without a transport peer; MLB treats unknown entries as
+        // incompatible clients, so give its protocol state the same capability as this host.
+        MlbPeerCompat.RegisterAiPeer(lobby, aiNetId);
         MainFile.Logger.Info($"AI added to lobby: slot {slot}, char {character.Id.Entry}");
         return aiLobbyPlayer;
     }
@@ -433,9 +438,12 @@ public class AiTeammateManager
     public void RemoveAiFromLobby(StartRunLobby lobby)
     {
         // Remove every AI entry, not just the first: older builds could leave duplicates behind.
+        var removedIds = lobby.Players.Where(p => AiIdentity.IsAi(p.id)).Select(p => p.id).ToList();
         var removed = lobby.Players.RemoveAll(p => AiIdentity.IsAi(p.id));
         if (removed > 0)
         {
+            foreach (var removedId in removedIds)
+                MlbPeerCompat.UnregisterAiPeer(lobby, removedId);
             MainFile.Logger.Info($"AI removed from lobby ({removed} entry/entries)");
         }
     }
@@ -528,8 +536,14 @@ public class AiTeammateManager
     {
         try
         {
+            // Random and the Dread "rotating" character are the two models a lobby cannot always
+            // begin with: Dread's StartRunLobby.BeginRunLocally throws outright ("Random or rotating
+            // character selected in Dread!") when a player holds either one. The AI teammate therefore
+            // only ever offers concrete characters, in every mode. RotatingCharacter exists only from
+            // 0.113.1 on, so it is matched by name instead of a type test.
+            // 随机/轮换角色在 Dread 里会让开局直接抛异常，AI 队友只提供固定角色。
             return ModelDb.AllCharacters
-                .Where(c => c is not RandomCharacter && !c.Id.Entry.Contains("Random", StringComparison.OrdinalIgnoreCase))
+                .Where(c => !IsPlaceholderCharacter(c))
                 .ToList();
         }
         catch (KeyNotFoundException)
@@ -540,6 +554,19 @@ public class AiTeammateManager
             // call this provider again once the models exist.
             return new List<CharacterModel>();
         }
+    }
+
+    /// <summary>
+    /// True for the character models that only resolve at run start (random) or belong to a rotation
+    /// (Dread). Neither may be handed to a lobby player: Dread refuses to begin a run that holds one.
+    /// 随机/轮换角色不能作为大厅里的固定角色。
+    /// </summary>
+    private static bool IsPlaceholderCharacter(CharacterModel character)
+    {
+        var typeName = character.GetType().Name;
+        return typeName is "RandomCharacter" or "RotatingCharacter"
+               || character.Id.Entry.Contains("Random", StringComparison.OrdinalIgnoreCase)
+               || character.Id.Entry.Contains("Rotating", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
