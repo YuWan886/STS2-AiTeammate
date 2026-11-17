@@ -8,8 +8,13 @@ using AiTeammate.AiTeammateCode.Compat;
 namespace AiTeammate.AiTeammateCode.Patches;
 
 /// <summary>
-/// Prevents CombatStateSynchronizer from blocking on AI players who have
-/// no real network peer. Replaces CheckSyncCompleted to skip AI netIds.
+/// Prevents CombatStateSynchronizer from blocking on AI players who have no real network peer, by
+/// replacing <c>CheckSyncCompleted</c> with a version that skips AI netIds.
+///
+/// The replacement owns the whole method, which on 0.113+ also contains the host's one-shot
+/// RNG / shared-relic broadcast — see <see cref="CombatSyncRngCompat"/>. Forgetting that broadcast
+/// leaves every client without a RNG set, stuck in <c>WaitForSync</c>: black screen before the
+/// first room, exactly the 2026-11-17 Dread reports.
 /// </summary>
 [HarmonyPatch(typeof(CombatStateSynchronizer), "CheckSyncCompleted")]
 public static class CombatStateSynchronizerPatch
@@ -53,6 +58,11 @@ public static class CombatStateSynchronizerPatch
         {
             return false;
         }
+
+        // 0.113+ only accepts "everybody is in" here *and* sends the host's RNG / shared relic grab
+        // bag from here. Replacing the method therefore also owns that broadcast: without it no
+        // client ever leaves WaitForSync.
+        CombatSyncRngCompat.PublishIfDeferred(__instance, netService, rngSet);
 
         if (rngSet != null)
             tcs.SetResult();

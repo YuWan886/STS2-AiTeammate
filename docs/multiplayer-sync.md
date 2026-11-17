@@ -20,6 +20,13 @@
 - **奖励与商店只有房主领取**（客户端等状态快照）。
 - **事件与休息处由房主决策后广播**（`AiSyncBus.KindChoice`），每个 peer 都要应用：事件需要每个 peer 的 `EventModel` 前进；休息处需要 AI 的选项在每个 peer 都解析掉，否则 `AfterAllRestSitesCompleted` 在那里挂住。
 
+## 战前同步（`CombatStateSynchronizer`）的两个坑
+
+- **0.113 起房主 RNG / 共享遗物池的广播点在 `CheckSyncCompleted` 里**（`StartSync` 只做快照，`_hasSentRngSet` 保证只发一次）。AI 没有网络对端，原版那个循环永远等不齐，所以补丁整体替换了这个方法 —— 替换时若只保留「齐了就 `SetResult`」，`SyncRngMessage` 就再也没人发：客户端 `_rngSet == null` → `WaitForSync` 不返回 → 第一个房间（涅奥）前黑屏，主机却能正常继续。补发逻辑在 `Compat/CombatSyncRngCompat`（≤0.111.x 没有该字段，`StartSync` 自己会发，helper 直接跳过）。
+- **AI 快照闸门的顺序**：房主在 `StartSync` 之后广播 `combat-start` 快照，但客户端的消息可能先到（实测比客户端自己的 `StartSync` 早 4ms）。闸门按「已应用数 / 已消费数」配对，先到就消费掉、不空等 2.5s 兜底；正常顺序到达时仍由 `ApplyNow` 收尾并重跑 `CheckSyncCompleted`。
+
+消息处理器必须在 `RunManager.Launch` 之前注册（`RunLaunchAiSyncPatch`）：开局到 `Launch` 之间的消息会被 `NetMessageBus` 缓冲，并在 `Launch` 里一次性派发，那时还没有 handler 的消息会被直接丢弃并报 `no message handlers are registered for that type`。
+
 ## 状态复制
 
 `Compat/AiStateSync` + `AiSyncBus.KindState`：房主广播 AI 的 `SerializablePlayer`（牌组 / 遗物 / 药水 / 金币 / RNG / 遗物抓包）。时机：AI 入队时、`CombatStateSynchronizer.StartSync`、以及奖励 / 事件 / 商店之后。客户端在战斗未进行时应用 `Player.SyncWithSerializedPlayer`；战前那次由快照闸门守着（`CombatStateSynchronizerPatch`），带 2.5s failsafe。

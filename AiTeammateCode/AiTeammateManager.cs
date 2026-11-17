@@ -269,7 +269,7 @@ public class AiTeammateManager
         {
             AiSyncBus.EnsureRegistered();
             AiSyncBus.ResetForNewRun();
-            AiStateSync.ClearPending();
+            AiStateSync.ResetForNewRun();
             if (AiMultiplayer.IsAuthority)
                 MainThread.Post(() => AiStateSync.BroadcastFromAuthority("ai-joined"));
         }

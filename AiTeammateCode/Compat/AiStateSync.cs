@@ -30,12 +30,32 @@ internal static class AiStateSync
 
     private static DateTime _combatSnapshotDeadline;
 
+    /// <summary>Reason label the host puts on the snapshot a client's pre-combat gate waits for.</summary>
+    private const string CombatSnapshotReason = "combat-start";
+
+    /// <summary>How many host combat snapshots this peer has adopted so far.</summary>
+    private static int _combatSnapshotsApplied;
+
+    /// <summary>Counter value the most recent pre-combat gate already consumed.</summary>
+    private static int _combatSnapshotsConsumed;
+
     public static void BeginCombatSyncWait()
     {
         if (!AiMultiplayer.IsFollower)
             return;
         if (AiTeammateManager.Instance.AiPlayer == null)
             return;
+
+        // The host broadcasts this snapshot right before StartSync. On a live connection it can land
+        // (and be adopted) before this peer even reaches StartSync — the 2026-11-17 logs show it
+        // applied 4 ms before the gate armed, after which the gate still blocked the whole
+        // pre-combat sync for its full 2.5 s failsafe. Consume the snapshot that is already here.
+        if (_combatSnapshotsApplied > _combatSnapshotsConsumed)
+        {
+            _combatSnapshotsConsumed = _combatSnapshotsApplied;
+            MainFile.Logger.Info("[Sync] 房主 AI 战斗快照已提前到达，跳过战斗同步等待");
+            return;
+        }
 
         AwaitingCombatSnapshot = true;
         _combatSnapshotDeadline = DateTime.UtcNow.AddSeconds(2.5);
@@ -136,6 +156,15 @@ internal static class AiStateSync
 
     public static void ClearPending() => _pending = null;
 
+    /// <summary>New run / AI re-bind: forget the previous run's snapshot bookkeeping.</summary>
+    public static void ResetForNewRun()
+    {
+        _pending = null;
+        AwaitingCombatSnapshot = false;
+        _combatSnapshotsApplied = 0;
+        _combatSnapshotsConsumed = 0;
+    }
+
     private static void ApplyNow(SerializablePlayer snapshot, string reason)
     {
         var state = RunManager.Instance?.DebugOnlyGetState();
@@ -154,6 +183,8 @@ internal static class AiStateSync
         {
             aiPlayer.SyncWithSerializedPlayer(snapshot);
             MainFile.Logger.Info($"[Sync] 已采用房主的 AI 状态 ({reason})");
+            if (reason.StartsWith(CombatSnapshotReason, StringComparison.Ordinal))
+                _combatSnapshotsApplied++;
         }
         catch (Exception ex)
         {
@@ -162,6 +193,9 @@ internal static class AiStateSync
 
         if (AiMultiplayer.IsFollower && AwaitingCombatSnapshot)
         {
+            // This snapshot is the one the gate was armed for; mark it consumed so the next combat
+            // does not take it for its own pre-combat snapshot.
+            _combatSnapshotsConsumed = _combatSnapshotsApplied;
             EndCombatSyncWait();
             RetriggerSyncCheck();
         }

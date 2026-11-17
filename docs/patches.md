@@ -34,8 +34,9 @@ loader 侧另有 `HarmonyPatchAllTypeLoadGuard`（把 `PatchAll` 的 `TypeLoadEx
 
 | 类 | 目标 | 作用 |
 |---|---|---|
-| `CombatStateSynchronizerPatch` | `CheckSyncCompleted` | 跳过 AI NetId，状态同步不等待不存在的对端；客户端在这一步挂起，直到房主的 AI 快照应用完毕。 |
-| `CombatSyncAiStatePatch` | `CombatStateSynchronizer.StartSync` | 房主在战斗同步前广播 AI 玩家快照；客户端进入快照闸门。 |
+| `CombatStateSynchronizerPatch` | `CheckSyncCompleted` | 跳过 AI NetId，状态同步不等待不存在的对端；客户端在这一步挂起，直到房主的 AI 快照应用完毕。**这个方法被整体替换，所以 0.113+ 里它负责的房主 RNG / 共享遗物池广播（`_hasSentRngSet` + `SyncRngMessage`）也必须由补丁自己补发（`Compat/CombatSyncRngCompat`）**：漏发时客户端 `_rngSet` 永远为 null，卡死在 `WaitForSync`，第一个房间（涅奥）之前就是黑屏。 |
+| `CombatSyncAiStatePatch` | `CombatStateSynchronizer.StartSync` | 房主在战斗同步前广播 AI 玩家快照；客户端进入快照闸门。快照可能先于闸门到达（实测早 4ms），`AiStateSync` 按 `combat-start` 计数消费，不再白等 2.5s 兜底。 |
+| `RunLaunchAiSyncPatch` | `RunManager.Launch` | 在 `Launch` 放缓冲消息（`SetBufferMessages(false)`）之前注册昵称/AI 同步处理器。处理器原来只在 `OnAiPlayerJoined` 注册，于是客户端在缓冲释放时还没有 handler，房主的 `AiNicknameMessage`/首个 `AiSyncMessage` 被丢掉（`no message handlers are registered for that type`）。标准大厅靠角色选择界面提前注册，Dread/Blitz 大厅没有这个钩子。 |
 | `SteamHostAiPeerSkipPatch` | `SteamHost.SendMessageToClient` | 丢弃发往保留 AI NetId 的定向消息（没有连接；原版会抛异常并把正在加入的人类踢掉）。 |
 | `AiActionOwnerPatch` | `ActionQueueSynchronizer.EnqueueAction` | 把 AI 动作重新归属到 `action.OwnerId`，客户端据此为 AI 重建动作，而不是记到发送的人类头上。 |
 | `AiChoiceBroadcastSkipPatch` | `PlayerChoiceSynchronizer.SyncLocalChoice` | 绝不广播 AI 的选牌结果（接收方会应用到发送者身上）；但仍在本机抛 `PlayerChoiceReceived`，让 `CombatReplayWriter` 记录 AI 选择。 |
