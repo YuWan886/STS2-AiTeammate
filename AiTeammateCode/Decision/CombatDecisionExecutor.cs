@@ -183,9 +183,10 @@ public class CombatDecisionExecutor
             // Not when an external agent supplies the decisions: cards drawn mid-turn (by cards or
             // potions) must be seen by it, so the pass loop re-asks instead of spending the energy
             // on cards it never saw. The caller decides whether another decision pass is worth it.
+            // Not gated on Energy/Stars any more: 0-cost cards stay playable with an empty pool,
+            // and PlayRemainingCards stops by itself when nothing passes CanPlay.
             if (!AiTeammateManager.Instance.ExternalBrainActive
-                && !CombatManager.Instance.IsOverOrEnding
-                && (combat.Energy > 0 || combat.Stars > 0))
+                && !CombatManager.Instance.IsOverOrEnding)
             {
                 cardsPlayed += await PlayRemainingCards(aiPlayer, state, combat, cardsPlayed);
             }
@@ -292,7 +293,10 @@ public class CombatDecisionExecutor
 
             if (CombatManager.Instance.IsOverOrEnding) break;
             if (played >= MaxCardsPerTurn) break;
-            if (combat.Energy <= 0 && combat.Stars <= 0) break;
+            // No "energy and stars are both 0 → stop" gate here: a 0-cost card is still playable
+            // with an empty pool, and the outer-plan case (external brain) must not silently drop
+            // the cards the brain just decided on. Unaffordable cards are skipped per card below
+            // (HasEnoughResourcesFor) with a log line, so nothing is lost silently.
 
             var card = FindCardInHand(combat, action.CardName);
             if (card == null)
@@ -590,15 +594,14 @@ public class CombatDecisionExecutor
         {
             if (SoloPaused) { PausedMidTurn = true; break; }
             if (CombatManager.Instance.IsOverOrEnding) break;
-            if (combat.Energy <= 0 && combat.Stars <= 0) break;
 
             var hand = combat.Hand.Cards.ToList();
             if (hand.Count == 0) break;
 
-            var playable = hand
-                .Where(c => !c.Keywords.Contains(CardKeyword.Unplayable)
-                         && combat.HasEnoughResourcesFor(c, out _))
-                .ToList();
+            // CanPlay is the gate the hand UI uses (TryManualPlay → CanPlay): it folds in the
+            // Unplayable keyword, energy/star cost, hook blocks and card logic. The old keyword +
+            // resources filter attempted state-blocked cards and skipped 0-cost hands entirely.
+            var playable = hand.Where(c => c.CanPlay(out _, out _)).ToList();
 
             if (playable.Count == 0) break;
 

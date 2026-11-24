@@ -151,7 +151,7 @@ TCP + UTF-8 行分隔 JSON，一行一个请求，一行一个响应。
 | `sts2_play_cards` | `{cards[], end_turn?, wait?, wait_seconds?}` | 一次调用打完整个回合：按序解析手牌、逐步重取快照；遇到非 combat 界面（选牌）或 `actionable=false` 立刻停并在 `steps[]` 说明；`end_turn` 只在无失败/无中断时附加 |
 | `sts2_use_potion` | `{potion, target?}` | `UsePotionAction` + `RequestEnqueue`；`AnyTime` 药水战斗外可用，`CombatOnly` 不行 |
 | `sts2_discard_potion` | `{potion}` | `DiscardPotionGameAction`（与药水栏 UI 同一条路）；直接 `potion.Discard()` 只改本机、会分叉 |
-| `sts2_end_turn` | `{}` | `EndPlayerTurnAction` 经 `ActionQueueSynchronizer.RequestEnqueue`；已 ready 时只回报"等待其他玩家"，绝不反向撤销。**不要**直接调 `SetReadyToEndTurn` |
+| `sts2_end_turn` | `{}` | `EndPlayerTurnAction` 经 `ActionQueueSynchronizer.RequestEnqueue`；已 ready 时只回报"等待其他玩家"，绝不反向撤销。**不要**直接调 `SetReadyToEndTurn`。手牌里还有 `CanPlay` 通过的牌时第一次调用会被拒并列出这些牌（每回合一次，`EndTurnHandGuard` 设置，再调一次即放行） |
 | `sts2_choose` | `{index, skip?}` | 地图/奖励/选牌奖励/选牌/篝火/事件/商店/遗物/选包/水晶球/目标/符文/**主菜单与大厅** |
 | `sts2_select_cards` | `{indices[]}` | `NCardGridSelectionScreen` 多选；校验屏幕自己的 `min..max`，再通过 `_completionSource` 交回 |
 | `sts2_proceed` | `{}` | 继续/离开奖励/跳过/开箱/结束界面/确认选包/关水晶球；菜单类 phase 等价"返回上一层" |
@@ -183,7 +183,7 @@ TCP + UTF-8 行分隔 JSON，一行一个请求，一行一个响应。
 - **连着 ≠ 在驱动**：`AgentDecisionBroker.AgentWatching` 要求 `Enabled` 且 `ClientIdleSeconds <= AgentFallbackSeconds`（为 0 时用 30 秒窗口）。超过窗口的决策**不挂起**，直接走自带后端（`AgentDecisionBroker.cs:172`）——dsh 恢复调用后立刻回到 dsh 手里。
 - **执行模式**：`AiTeammateManager.ExternalBrainActive` 决定"按模型原序出牌、跳过 Phase 3 清空手牌、允许更多决策轮次"。它是**全房一致项**：房主取本机 `AgentDecisionBroker.Enabled`，客户端跟随战斗计划里的 `externalBrain` 字段（`AiCombatPlanCodec`），不一致就切换（`AiTeammateManager.cs:765,805`）。两端播放顺序不同 → 弃牌堆顺序分叉 → `StateDivergence` 踢人。
 - **轮次预算**：外部大脑单回合最多 6 次决策（内置 3 次），硬超时 `330 + 90×(轮次-1)` 秒（`AiTeammateManager.cs:37,770`）；仍有能量/辉星且有可打牌才会追加下一次。内置后端 `Math.Clamp(CombatTurnBudgetSeconds,15,180)` 秒。
-- Phase 3（启发式清空剩余手牌）在 `ExternalBrainActive` 时关闭（`CombatDecisionExecutor.cs:182`），否则会花掉 dsh 还没看见的抽牌。
+- Phase 3（启发式清空剩余手牌）在 `ExternalBrainActive` 时关闭（`CombatDecisionExecutor.cs`），否则会花掉 dsh 还没看见的抽牌。**代偿**：战斗计划含 `end_turn` 但手牌仍有可打牌时，`AiTeammateManager` 会向外部大脑真补问一次（每回合一次，和人类结束回合时的撤销 ready 共用同一个一次性标记）。
 - 决策返回 `tool_calls`（`read_pile`/`card_info` …）仍有效：主线程执行只读工具、结果拼进新 prompt 再挂一次决策。
 - **校验反馈**：`last_decision{id,kind,requested,dropped,resolved,valid,age_seconds}`，`resolved` 形如 `"打击->骷髅[#1]"`，对被丢弃动作在 `notes` 里提醒。
 - **人格**：`Enabled` 时 system prompt 用 `PersonalityPromptBuilder.BuildExternalAgentSystemPrompt`（`prompt.system.external_agent`），只保留 JSON/语言要求与团队协作原则，人格由 dsh 自己决定。

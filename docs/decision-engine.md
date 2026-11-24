@@ -5,7 +5,7 @@ AI 的每一个决定都走 `DecisionService`：战斗内用回合循环 + `Comb
 ## 1. 战斗回合
 
 - 触发：`CombatManagerPatch` 订阅 `TurnStarted` → 后台线程跑 `ProcessCombatTurnAsync`，带超时与取消；新回合会取消上一回合在飞的请求（`CancellationTokenSource`）。
-- 四个阶段：**0 药水 → 1 铺场（非攻击牌）→ 2 协调攻击 → 3 剩余可打牌**。协调攻击用 `wait_for` 排队：`CombatDecisionExecutor` 以 `CoordinationPollMs = 120ms` 轮询，窗口 `900ms` / `2000ms`（有显式 defer 时更长）。
+- 四个阶段：**0 药水 → 1 铺场（非攻击牌）→ 2 协调攻击 → 3 剩余可打牌**。Phase 3 的判据是 `CardModel.CanPlay()`（含关键字/资源/钩子/卡牌逻辑），不再只看 `Unplayable` 关键字，也不再用能量>0 作门槛——0 费手牌同样纳入扫描。协调攻击用 `wait_for` 排队：`CombatDecisionExecutor` 以 `CoordinationPollMs = 120ms` 轮询，窗口 `900ms` / `2000ms`（有显式 defer 时更长）。
 - 硬超时：`CombatTurnBudgetSeconds`（默认 45s）；`finally` 里如果战斗仍在跑，强制 `SetReadyToEndTurn` 结束回合，避免任何路径卡死。
 - 退路：`DecisionValidator.ApplyFallback` 本地启发式，优先级 攻击 → 技能 → 能力。
 - dsh 驱动时执行器跳过 Phase 3、最多 6 pass（见 [dsh-agent-bridge.md](dsh-agent-bridge.md)）；多人下这套差异必须由战斗计划的 `externalBrain` 传递（见 [multiplayer-sync.md](multiplayer-sync.md)）。

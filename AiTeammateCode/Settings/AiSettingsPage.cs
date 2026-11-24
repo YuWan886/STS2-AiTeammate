@@ -90,6 +90,8 @@ public static class AiSettingsPage
         B(s => s.EnableOutOfCombatReadTools, (s, v) => s.EnableOutOfCombatReadTools = v);
     private static readonly ModSettingsValueBinding<AiSettings, bool> EnableScreenshotTool =
         B(s => s.EnableScreenshotTool, (s, v) => s.EnableScreenshotTool = v);
+    private static readonly ModSettingsValueBinding<AiSettings, bool> EndTurnHandGuard =
+        B(s => s.EndTurnHandGuard, (s, v) => s.EndTurnHandGuard = v);
 
     // ---- Bilibili live danmaku bindings ----
 
@@ -456,6 +458,10 @@ public static class AiSettingsPage
                     CombatTurnBudgetSeconds, 15, 180, 5,
                     description: S("settings.decision.combat_turn_budget.desc",
                         "Hard cap for processing one combat turn with the built-in backend. The dsh bridge keeps its own, larger budget."))
+                .AddToggle("end_turn_hand_guard", S("settings.decision.end_turn_hand_guard", "Check the hand before ending the turn"),
+                    EndTurnHandGuard,
+                    description: S("settings.decision.end_turn_hand_guard.desc",
+                        "When dsh asks to end the turn with playable cards still in hand, refuse that one request and list them; the next sts2_end_turn goes through. Costs one extra round trip."))
                 .AddIntSlider("chat_timeout", S("settings.chat.timeout", "Chat timeout (ms)"), ChatTimeoutMs,
                     2000, 60000, 500,
                     description: S("settings.chat.timeout.desc", "Maximum wait for a chat request."))

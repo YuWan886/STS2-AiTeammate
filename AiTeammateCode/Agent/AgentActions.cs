@@ -42,6 +42,7 @@ using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using AiTeammate.AiTeammateCode.Compat;
 using AiTeammate.AiTeammateCode.Decision;
+using AiTeammate.AiTeammateCode.Settings;
 using AiTeammate.AiTeammateCode.Solo;
 
 namespace AiTeammate.AiTeammateCode.Agent;
@@ -524,6 +525,61 @@ internal static class AgentActions
         }
     }
 
+    // ---- End-turn hand guard ---------------------------------------------------------------
+
+    private static readonly Lock EndTurnGuardLock = new();
+    // Keyed on the combat instance (a new PlayerCombatState per combat) plus the turn number, so
+    // turn 1 of the next fight is not blocked by turn 1 of the previous one.
+    private static PlayerCombatState? _endTurnGuardCombat;
+    private static int _endTurnGuardTurn = -1;
+
+    /// <summary>
+    /// True once per turn when the model asks to end the turn with playable cards still in hand.
+    /// The caller refuses that request and lists the cards; the next request is let through.
+    /// </summary>
+    private static bool ShouldRefuseEndTurn(Player player, PlayerCombatState combat, out string detail)
+    {
+        detail = "";
+        try
+        {
+            if (!AiSettingsStore.Current.EndTurnHandGuard)
+                return false;
+        }
+        catch
+        {
+            return false;
+        }
+
+        var playable = new List<string>();
+        for (var i = 0; i < combat.Hand.Cards.Count && playable.Count < 6; i++)
+        {
+            var card = combat.Hand.Cards[i];
+            // CanPlay is the same gate the hand UI uses (TryManualPlay → CanPlay): it folds in the
+            // Unplayable keyword, energy/star cost, hook blocks and card logic. 0-cost cards pass
+            // with an empty energy pool, which is exactly the case worth reporting.
+            if (!card.CanPlay(out _, out _))
+                continue;
+            playable.Add($"{i}:{card.Title ?? card.Id.Entry}");
+        }
+
+        if (playable.Count == 0)
+            return false;
+
+        lock (EndTurnGuardLock)
+        {
+            if (_endTurnGuardTurn == combat.TurnNumber && ReferenceEquals(_endTurnGuardCombat, combat))
+                return false;
+
+            _endTurnGuardTurn = combat.TurnNumber;
+            _endTurnGuardCombat = combat;
+        }
+
+        detail = $"The turn still has playable cards: {string.Join(", ", playable)}. "
+                 + $"Energy {combat.Energy}/{combat.MaxEnergy}, stars {combat.Stars}. "
+                 + "Play them with sts2_play_cards, or call sts2_end_turn again to end the turn anyway.";
+        return true;
+    }
+
     private static AgentActionResult PlayCard(JsonObject args, AgentSnapshot snap)
     {
         if (IsHandSelecting())
@@ -729,6 +785,13 @@ internal static class AgentActions
 
         if (player.PlayerCombatState is not { } combat)
             return Fail("No combat state for the local player.");
+
+        // Hand guard: nothing else spends the leftovers — in external-brain mode the built-in
+        // Phase 3 pass is off, so ending the turn early just wastes the hand. Refuse the first
+        // request per turn and hand the cards back; the second request always goes through (a
+        // deliberately kept card must never deadlock the turn).
+        if (ShouldRefuseEndTurn(player, combat, out var handDetail))
+            return Fail(handDetail);
 
         try
         {

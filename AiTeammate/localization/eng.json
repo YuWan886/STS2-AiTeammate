@@ -116,6 +116,8 @@
   "settings.decision.non_combat_timeout.desc": "Upper bound for one card reward / map / shop / rest site / treasure / event decision: the request timeout and the outer cap the room patches apply.",
   "settings.decision.combat_turn_budget": "Combat turn hard limit (s)",
   "settings.decision.combat_turn_budget.desc": "Hard cap for processing one combat turn with the built-in backend. The dsh bridge keeps its own, larger budget.",
+  "settings.decision.end_turn_hand_guard": "Check the hand before ending the turn",
+  "settings.decision.end_turn_hand_guard.desc": "When dsh asks to end the turn with playable cards still in hand, refuse that one request and list them; the next sts2_end_turn goes through. Costs one extra round trip.",
   "settings.chat.timeout": "Chat timeout (ms)",
   "settings.chat.timeout.desc": "Maximum wait for a chat request.",
   "settings.decision.retry": "Out-of-combat retries",

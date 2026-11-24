@@ -782,6 +782,10 @@ public class AiTeammateManager
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, hardTimeoutCts.Token);
             var effectiveCt = linkedCts.Token;
 
+            // One-shot: an external brain that says end_turn with playables left gets exactly one
+            // more decision pass per turn (see the end_turn branch below).
+            var endTurnGuardPassUsed = false;
+
             for (var decisionPass = 1; decisionPass <= maxDecisionPasses; decisionPass++)
             {
                 effectiveCt.ThrowIfCancellationRequested();
@@ -883,6 +887,25 @@ public class AiTeammateManager
                 // and that case still deserves another pass.
                 if (!result.IsFallback && result.Actions.Any(action => action.Type == "end_turn"))
                 {
+                    // ...but an external brain never runs the built-in Phase 3 cleanup, so an early
+                    // end_turn silently wastes the hand. Ask it exactly one extra time per turn when
+                    // playables remain; the once-per-turn flag (shared with the human-end-turn
+                    // guard) keeps a model that keeps insisting on end_turn from ping-ponging.
+                    if (ExternalBrainActive
+                        && !endTurnGuardPassUsed
+                        && decisionPass < maxDecisionPasses
+                        && HasExtraPlayerTurnCombatDecisionOpportunity()
+                        && TryPrepareExtraPlayerTurnCombatDecision())
+                    {
+                        endTurnGuardPassUsed = true;
+                        // We are the consumer of this budget: clear the pending half so a later
+                        // human "end turn" cannot trigger a second, concurrent turn pass (that
+                        // would cancel this one through _turnCts).
+                        ConsumePendingExtraPlayerTurnCombatDecision();
+                        AiLog.Log("COMBAT", "决策含 end_turn，但手牌仍有可打牌 —— 向外部大脑补问一次");
+                        continue;
+                    }
+
                     AiLog.Log("COMBAT", "决策包含 end_turn，本回合不再发起新的战斗决策");
                     break;
                 }

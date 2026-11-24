@@ -67,6 +67,15 @@ public sealed class AiSettings
     /// </summary>
     public int CombatTurnBudgetSeconds { get; set; } = 45;
 
+    /// <summary>
+    /// dsh path: when the external agent asks to end the turn while playable cards are still in
+    /// hand, refuse the first request and list them; the next request always goes through (so a
+    /// deliberately kept card can never deadlock the turn). The built-in executor is unaffected —
+    /// its Phase 3 already spends the leftovers.
+    /// dsh 结束回合时若手牌仍有可打牌，先拒绝一次并列出剩余牌。
+    /// </summary>
+    public bool EndTurnHandGuard { get; set; } = true;
+
     public int ChatTimeoutMs { get; set; } = 10000;
     public int NonCombatRetryCount { get; set; } = 2;
 
